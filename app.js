@@ -43,6 +43,110 @@
     return 'insufficient';
   }
 
+  /* ---------------- Font preview ---------------- */
+
+  // Shows the whole site in a candidate typeface before committing to one: open
+  // /?font=inter, then flick through the rest from the switcher that appears.
+  // Only names on this list load anything, so the query string can never pick a
+  // stylesheet URL of its own. Each entry asks for 400, 700 and 700 italic - the
+  // weights the CSS uses - where the family has them.
+  var FONTS = {
+    'lato': ['Lato', 'Lato:ital,wght@0,400;0,700;1,700'],
+    'inter': ['Inter', 'Inter:ital,wght@0,400;0,700;1,700'],
+    'plus-jakarta-sans': ['Plus Jakarta Sans', 'Plus+Jakarta+Sans:ital,wght@0,400;0,700;1,700'],
+    'dm-sans': ['DM Sans', 'DM+Sans:ital,wght@0,400;0,700;1,700'],
+    'manrope': ['Manrope', 'Manrope:wght@400;700'],
+    'outfit': ['Outfit', 'Outfit:wght@400;700'],
+    'space-grotesk': ['Space Grotesk', 'Space+Grotesk:wght@400;700'],
+    'poppins': ['Poppins', 'Poppins:ital,wght@0,400;0,700;1,700'],
+    'nunito-sans': ['Nunito Sans', 'Nunito+Sans:ital,wght@0,400;0,700;1,700']
+  };
+  // The family styles.css names in --font and both pages already load.
+  var DEFAULT_FONT = 'lato';
+  var FONT_STORE = 'claimifi-font-preview';
+
+  function fontKey(name) {
+    var k = String(name || '').trim().toLowerCase().replace(/[\s+_]+/g, '-');
+    return Object.prototype.hasOwnProperty.call(FONTS, k) ? k : null;
+  }
+
+  // Storage throws outright in some private windows and under strict cookie
+  // settings. A preview is a convenience and must never stop the page working.
+  function session(fn) {
+    try { return fn(window.sessionStorage); } catch (e) { return null; }
+  }
+
+  function applyFont(key) {
+    var link = $('fontPreviewCss');
+    if (key === DEFAULT_FONT) {
+      if (link) link.parentNode.removeChild(link);
+      document.documentElement.style.removeProperty('--font');
+      return;
+    }
+    if (!link) {
+      link = document.createElement('link');
+      link.id = 'fontPreviewCss';
+      link.rel = 'stylesheet';
+      document.head.appendChild(link);
+    }
+    link.href = 'https://fonts.googleapis.com/css2?family=' + FONTS[key][1] + '&display=swap';
+    document.documentElement.style.setProperty('--font', "'" + FONTS[key][0] + "'");
+  }
+
+  // Keeps ?font= in the address bar matching the pick, so the link can be sent
+  // on as it stands. ?q= and anything else in the query is left alone.
+  function syncFontParam(key) {
+    try {
+      var url = new URL(window.location.href);
+      if (key) url.searchParams.set('font', key); else url.searchParams.delete('font');
+      history.replaceState(history.state, '', url.pathname + url.search + url.hash);
+    } catch (e) { /* URL or history unavailable */ }
+  }
+
+  function openFontPreview(current) {
+    var box = document.createElement('div');
+    box.className = 'font-preview';
+    box.setAttribute('role', 'group');
+    box.setAttribute('aria-label', 'Font preview');
+    box.innerHTML =
+      '<label for="fontPreviewSelect">Font preview</label>' +
+      '<select id="fontPreviewSelect">' +
+        Object.keys(FONTS).map(function (k) {
+          return '<option value="' + k + '"' + (k === current ? ' selected' : '') + '>' +
+            esc(FONTS[k][0]) + (k === DEFAULT_FONT ? ' (current)' : '') + '</option>';
+        }).join('') +
+      '</select>' +
+      '<button type="button" id="fontPreviewClose" aria-label="Close the font preview">&times;</button>';
+    document.body.appendChild(box);
+
+    $('fontPreviewSelect').addEventListener('change', function (e) {
+      var key = fontKey(e.target.value) || DEFAULT_FONT;
+      applyFont(key);
+      session(function (s) { s.setItem(FONT_STORE, key); });
+      syncFontParam(key);
+    });
+    $('fontPreviewClose').addEventListener('click', function () {
+      applyFont(DEFAULT_FONT);
+      session(function (s) { s.removeItem(FONT_STORE); });
+      syncFontParam(null);
+      box.parentNode.removeChild(box);
+    });
+  }
+
+  (function () {
+    var param = null;
+    try { param = new URLSearchParams(window.location.search).get('font'); } catch (e) { /* unavailable */ }
+    var saved = session(function (s) { return s.getItem(FONT_STORE); });
+    // Opened by ?font= - an unknown name still opens it, showing what is on
+    // offer - or by a pick made earlier in this tab. Otherwise nothing happens.
+    if (param === null && !fontKey(saved)) return;
+    var key = fontKey(param) || fontKey(saved) || DEFAULT_FONT;
+    applyFont(key);
+    session(function (s) { s.setItem(FONT_STORE, key); });
+    syncFontParam(key);
+    openFontPreview(key);
+  })();
+
   /* ---------------- Status badge ---------------- */
 
   // Short, discrete announcements for screen readers. The results panel is

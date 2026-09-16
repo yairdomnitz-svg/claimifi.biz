@@ -28,6 +28,24 @@ them as `/styles.css?v=<hash>`, where the hash is derived from the contents of
 the CSS, the JS and the logo at startup, so a deploy invalidates a visitor's
 cached copy automatically.
 
+## Colour and type
+
+Colours and the typeface are tokens at the top of `styles.css`. The page is plain
+white, and the accents come from the logo: the gradient `#A461F6` → `#7887F2`
+and the check's `#B4D5F8`. Those three are used as fills only. Text accents are
+deeper versions of the same hues, because the logo colours are too light to read
+as text on white.
+
+Every element uses one typeface, currently Lato. To change it, edit `--font` in
+`styles.css` and the Google Fonts `<link>` in both `index.html` and `app.html`.
+
+To compare fonts on the real pages before changing anything, add `?font=` to any
+URL, for example `https://claimifi.biz/?font=inter`. A switcher appears in the
+bottom-left corner with the shortlist: Lato, Inter, Plus Jakarta Sans, DM Sans,
+Manrope, Outfit, Space Grotesk, Poppins and Nunito Sans. The choice carries
+across pages until the switcher is closed, and the address bar keeps a link to
+the current pick. Visitors who never open a `?font=` link see no change.
+
 ## Railway deployment
 
 The service builds with **Railpack**, which auto-detects Python from `requirements.txt`.

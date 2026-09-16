@@ -146,6 +146,59 @@ def test_every_class_the_script_emits_is_styled():
 
 
 # --------------------------------------------------------------------------
+# Colour and type
+# --------------------------------------------------------------------------
+def _root_token(name: str) -> str:
+    root = re.search(r":root\s*\{([^}]*)\}", STYLES).group(1)
+    match = re.search(rf"--{name}:\s*([^;]+);", root)
+    assert match, f"--{name} missing from :root"
+    return match.group(1).strip()
+
+
+def test_the_page_background_is_plain_white():
+    """The brief is a plain white page. The checkered grid and the glow it
+    replaced lived in a fixed body::before layer, so that is what must not
+    come back, and the browser chrome should match the page."""
+    assert _root_token("bg").lower() in ("#fff", "#ffffff")
+    assert not re.search(r"body::(?:before|after)", STYLES)
+    body = re.search(r"(?m)^body\s*\{[^}]*\}", STYLES).group(0)
+    assert "background: var(--bg);" in body
+    for html in (INDEX_HTML, APP_HTML):
+        assert '<meta name="theme-color" content="#ffffff">' in html
+
+
+def test_one_token_sets_the_typeface_everywhere():
+    """The complaint was a font that kept changing from one element to the
+    next. Every family now resolves through --font, and controls inherit it
+    instead of dropping to the browser's own form-control font."""
+    families = re.findall(r"font-family:\s*([^;]+);", STYLES)
+    assert families, "no font-family declarations found"
+    for value in families:
+        assert value.startswith("var(--font)") or value == "inherit", value
+    for shorthand in re.findall(r"(?<![-\w])font:\s*([^;]+);", STYLES):
+        assert shorthand == "inherit", shorthand
+
+
+def test_both_pages_load_the_family_the_stylesheet_names():
+    """Changing the typeface is --font plus the Google Fonts link. Changing one
+    without the other renders the system fallback with no error anywhere."""
+    family = _root_token("font").strip("'\"")
+    for html in (INDEX_HTML, APP_HTML):
+        assert f"css2?family={family.replace(' ', '+')}:" in html
+    default = re.search(r"var DEFAULT_FONT = '([^']+)'", APP_JS).group(1)
+    assert f"'{default}': ['{family}'," in APP_JS, "font preview default is not the live family"
+
+
+def test_font_preview_only_loads_listed_fonts():
+    """?font= comes from the address bar. It may pick an entry off the list,
+    never supply the stylesheet URL or the family name itself."""
+    assert "Object.prototype.hasOwnProperty.call(FONTS, k)" in APP_JS
+    apply = APP_JS[APP_JS.index("function applyFont") : APP_JS.index("function syncFontParam")]
+    assert "FONTS[key][1]" in apply and "FONTS[key][0]" in apply
+    assert "location" not in apply
+
+
+# --------------------------------------------------------------------------
 # Comments must not describe behaviour the code does not have
 # --------------------------------------------------------------------------
 def test_deep_link_comment_matches_the_code():
