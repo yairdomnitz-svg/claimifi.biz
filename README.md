@@ -127,15 +127,24 @@ touches YouTube.
 `POST /api/analyze` failure codes: `400` malformed input, or a bare video ID sent as a
 title; `403` age-restricted video; `404` no captions / video unavailable; `422` empty or
 too-short transcript, or a pydantic validation error (whose `detail` is a **list**, not a
-string); `429` per-IP rate limit; `503` no `XAI_API_KEY` (carrying `"reason": "no_api_key"`),
-global budget reached, or too many fetches in flight; `502` upstream failure; `504` timeout.
+string); `429` per-IP rate limit, and nothing else; `503` analysis paused (carrying
+`"reason": "analysis_disabled"`), no `XAI_API_KEY` (carrying `"reason": "no_api_key"`), the
+day's `DAILY_BUDGET_USD` or the global limit reached, xAI rate-limiting the service, or too
+many fetches in flight; `502` upstream failure; `504` timeout.
+
+Paused, unconfigured and out-of-budget are checked before anything is spent, so they cost
+neither a rate-limit slot nor a transcript fetch.
 
 Only `502`, `503` and `504` refund the caller's rate-limit slot. A `404` for a captionless
 video is an answer about the video the caller chose, and charging for it is what keeps the
-transcript path metered at all.
+transcript path metered at all. A `502` that xAI still billed — a reply cut off at
+`GROK_MAX_TOKENS`, empty, or malformed — is not refunded either, and it counts against
+`DAILY_BUDGET_USD` like any other call, reasoning tokens included.
 
 The response carries `basis: "transcript" | "title"`. A `title` analysis never read the
-video, and the page marks it as such — do not present the two identically.
+video, and the page marks it as such — do not present the two identically. A transcript
+analysis reads the video's English captions when it has any, and otherwise whatever
+captions it does have; the analysis itself is always written in English.
 
 The interactive API docs (`/docs`, `/redoc`, `/openapi.json`) are disabled.
 

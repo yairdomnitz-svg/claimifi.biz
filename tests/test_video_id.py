@@ -91,3 +91,20 @@ def test_videoseries_is_not_a_video_id(extract):
 def test_bare_id_must_be_the_whole_string(extract):
     assert extract(f"a {VALID} b") is None
     assert extract(f"{VALID}x") is None
+
+
+@pytest.mark.parametrize(
+    "word", ["Anglo-Saxon", "Greco-Roman", "Sino-Soviet", "Neo-Assyria", "post-soviet"]
+)
+def test_hyphenated_words_are_titles_not_video_ids(extract, word):
+    """Eleven characters with a hyphen matched the bare-id shape, so these were
+    charged a rate-limit slot and a proxy fetch to report "video unavailable"."""
+    assert len(word) == 11
+    assert extract(word) is None
+
+
+@pytest.mark.parametrize("ident", ["aBcdefgh-ij", "Abcdefgh-iJ", "x-abcdefghi", "ab-cd_efghi"])
+def test_ids_that_merely_contain_hyphens_are_still_ids(extract, ident):
+    """Only the shape of words is excluded. Mixed case inside a segment, a
+    one-letter segment, or any digit or underscore keeps a token an id."""
+    assert extract(ident) == ident

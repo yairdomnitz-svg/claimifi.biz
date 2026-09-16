@@ -26,10 +26,12 @@
   // The digit/underscore/hyphen requirement matters: "Renaissance",
   // "Reformation" and "Charlemagne" are all exactly 11 letters, and routing
   // those as video ids broke the title-only path for common one-word topics.
-  // Kept identical to _VIDEO_ID_PATTERNS[1] in main.py.
+  // Hyphenated words are excluded for the same reason: "Anglo-Saxon" and
+  // "Greco-Roman" are 11 characters too. Kept identical to
+  // _VIDEO_ID_PATTERNS[1] in main.py.
   function looksLikeVideo(q) {
     return /youtube\.com|youtu\.be|youtube-nocookie\.com/.test(q) ||
-           /^(?=[a-zA-Z0-9_-]{11}$)[a-zA-Z]*[0-9_-][a-zA-Z0-9_-]*$/.test(q);
+           /^(?=[a-zA-Z0-9_-]{11}$)(?![A-Za-z][a-z]+(?:-[A-Za-z][a-z]+)+$)[a-zA-Z]*[0-9_-][a-zA-Z0-9_-]*$/.test(q);
   }
 
   // "Unsupported" contains "supported", so it must be tested first.
@@ -169,6 +171,11 @@
     }).join('');
   }
 
+  // Shown on the page and carried into the copied report, which travels
+  // without the page's "Title only" badge.
+  var TITLE_ONLY_NOTE = 'No transcript was read. This covers the claims a video with this ' +
+    'title typically makes, not what this video actually says.';
+
   function renderAnalysis(data) {
     var claims = Array.isArray(data.claims) ? data.claims : [];
     var titleOnly = data.basis === 'title';
@@ -207,8 +214,7 @@
     shell(pill[0], pill[1],
       (titleOnly
         ? '<div class="panel-body notice">' +
-            '<p>No transcript was read. This covers the claims a video with this ' +
-            'title typically makes, not what this video actually says.</p>' +
+            '<p>' + esc(TITLE_ONLY_NOTE) + '</p>' +
           '</div>'
         : '') +
       '<div class="panel-body">' +
@@ -242,7 +248,11 @@
     var copyBtn = $('copyBtn');
     if (copyBtn) {
       copyBtn.addEventListener('click', function () {
-        var lines = ['Claimifi.biz — ' + (data.video_title || ''), ''];
+        var lines = ['Claimifi.biz — ' + (data.video_title || '')];
+        // Without this a pasted title-only report reads exactly like one that
+        // checked the transcript: the badge that says otherwise stays on the page.
+        if (titleOnly) lines.push('Title only: ' + TITLE_ONLY_NOTE);
+        lines.push('');
         claims.forEach(function (c, i) {
           lines.push((i + 1) + '. ' + c.claim);
           lines.push('   Verdict: ' + c.verdict);
@@ -305,7 +315,9 @@
 
     var cleanup = function () {
       running = false;
-      btn.disabled = false;
+      // Not simply false: a pause can arrive with this very response, and
+      // re-enabling here left a button that looked live and did nothing.
+      btn.disabled = paused;
       setBusy(false);
       timers.forEach(clearTimeout);
       clearInterval(tick);

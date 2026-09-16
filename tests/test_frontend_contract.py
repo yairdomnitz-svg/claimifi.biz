@@ -155,3 +155,42 @@ def test_deep_link_comment_matches_the_code():
     assert "does not run" in comment
     tail = APP_JS[APP_JS.index("var q0 = new URLSearchParams") :]
     assert "run()" not in tail
+
+
+# --------------------------------------------------------------------------
+# Regression locks for behaviour verified by running app.js
+# --------------------------------------------------------------------------
+def test_client_and_server_agree_on_what_a_bare_video_id_is(fresh_main):
+    """The two patterns are meant to be identical. When they drift, the page
+    sends a title down the transcript path, or an id down the title path, and
+    either way the visitor gets a 400 they cannot make sense of."""
+    module = fresh_main()
+    found = re.search(r"/(\^\(\?=\[a-zA-Z0-9_-\]\{11\}\$\)[^/\n]*)/\.test\(q\)", APP_JS)
+    assert found, "bare-id regex not found in app.js"
+    client_pattern = re.compile(found.group(1))
+    server_pattern = module._VIDEO_ID_PATTERNS[1]
+
+    corpus = [
+        "dQw4w9WgXcQ", "a_bcdefghij", "12345678901", "abcdefghi-j", "aBcdefgh-ij",
+        "Renaissance", "Charlemagne", "Anglo-Saxon", "Greco-Roman", "post-soviet",
+        "Why 1453 ma", "dQw4w9WgXcQx", "", "The Fall of the Roman Empire",
+    ]
+    for text in corpus:
+        assert bool(client_pattern.search(text)) == bool(server_pattern.search(text)), text
+
+
+def test_a_finished_request_leaves_a_paused_button_disabled():
+    """A pause can arrive with the very response that reports it: applyPaused()
+    disabled the button, then cleanup() re-enabled it, leaving a button that
+    looked live and silently did nothing."""
+    cleanup = APP_JS[APP_JS.index("var cleanup = function") : APP_JS.index("var ctrl = new AbortController")]
+    assert "btn.disabled = paused" in cleanup
+    assert "btn.disabled = false" not in cleanup
+
+
+def test_the_copied_report_carries_the_title_only_caveat():
+    """The badge stays on the page. The copy goes wherever it is pasted, where a
+    title-only report read exactly like one that checked the transcript."""
+    handler = APP_JS[APP_JS.index("copyBtn.addEventListener") : APP_JS.index("navigator.clipboard.writeText")]
+    assert "titleOnly" in handler
+    assert "TITLE_ONLY_NOTE" in handler

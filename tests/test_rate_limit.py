@@ -366,3 +366,51 @@ def test_depth_is_clamped_to_at_least_one(client):
     assert module.TRUSTED_PROXY_HOPS == 1
     module, _ = client(TRUSTED_PROXY_HOPS=-5)
     assert module.TRUSTED_PROXY_HOPS == 1
+
+
+# --- Refunds for failures upstream at xAI ------------------------------------
+
+
+def _xai_answers(module, response):
+    async def post(*args, **kwargs):
+        return response
+
+    module._grok_client = type("Stub", (), {"post": staticmethod(post)})()
+
+
+def test_a_failure_xai_billed_keeps_the_slot(client):
+    """502 is refundable, so a reply cut off at GROK_MAX_TOKENS gave the slot
+    back - making the costliest failure the one anybody could repeat forever
+    while neither counter moved."""
+    import httpx
+
+    module, c = client(XAI_API_KEY="k", RATE_LIMIT_REQUESTS=2, RATE_LIMIT_WINDOW=600)
+    _xai_answers(module, httpx.Response(200, json={
+        "choices": [{"finish_reason": "length", "message": {"content": '{"claims": ['}}],
+        "usage": {"prompt_tokens": 25_000, "completion_tokens": 8_000},
+    }))
+
+    codes = [
+        c.post("/api/analyze", json=TITLE, headers=xff("198.51.100.20")).status_code
+        for _ in range(3)
+    ]
+    assert codes == [502, 502, 429]
+
+
+@pytest.mark.parametrize("upstream,expected", [(500, 502), (429, 503)])
+def test_failures_xai_did_not_bill_still_refund(client, upstream, expected):
+    """The other half: an xAI outage, or xAI throttling this service, is the
+    service failing and must not cost the visitor anything. A throttle used to
+    come back as a non-refundable 429 that read as their own limit."""
+    import httpx
+
+    module, c = client(XAI_API_KEY="k", RATE_LIMIT_REQUESTS=2, RATE_LIMIT_WINDOW=600)
+    _xai_answers(module, httpx.Response(upstream, json={"error": "nope"}))
+    for _ in range(4):
+        assert c.post("/api/analyze", json=TITLE, headers=xff("198.51.100.21")).status_code == expected
+
+    _xai_answers(module, httpx.Response(200, json={
+        "choices": [{"message": {"content": '{"claims": [], "overall_assessment": "x", "sources_used": []}'}}],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 10},
+    }))
+    assert c.post("/api/analyze", json=TITLE, headers=xff("198.51.100.21")).status_code == 200

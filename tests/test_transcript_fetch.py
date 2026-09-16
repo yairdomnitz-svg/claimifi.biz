@@ -2,15 +2,18 @@
 
 The tests in test_analyze_api.py stub `_fetch_transcript_sync` itself, so they
 never execute the real construction, classification and cleanup path. These do:
-they replace `YouTubeTranscriptApi.fetch`, so everything around it — the session,
-the proxy plumbing, the exception mapping, the empty-track guard and the
-try/finally close — actually runs.
+they replace `YouTubeTranscriptApi.list` and `Transcript.fetch` - the two calls
+that reach YouTube - so everything around them - the session, the proxy
+plumbing, the choice of caption track, the exception mapping, the empty-track
+guard and the try/finally close - actually runs.
 """
 
 from __future__ import annotations
 
 import pytest
 from fastapi import HTTPException
+
+VIDEO = "dQw4w9WgXcQ"
 
 
 class _Snippet:
@@ -20,16 +23,45 @@ class _Snippet:
         self.text = text
 
 
+def _track(language_code, generated=False, video_id=VIDEO):
+    """A real Transcript. Its fetch() is patched, so the URL is never requested."""
+    from youtube_transcript_api import Transcript
+
+    return Transcript(
+        None, video_id, "https://www.youtube.com/api/timedtext", language_code,
+        language_code, generated, [],
+    )
+
+
+def _tracks(*tracks, video_id=VIDEO):
+    """A real TranscriptList, so track preference runs the library's own lookup."""
+    from youtube_transcript_api import TranscriptList
+
+    manual = {t.language_code: t for t in tracks if not t.is_generated}
+    generated = {t.language_code: t for t in tracks if t.is_generated}
+    return TranscriptList(video_id, manual, generated, [])
+
+
 @pytest.fixture
 def patched_fetch(fresh_main, monkeypatch):
-    """Drive main._fetch_transcript_sync with a chosen YouTubeTranscriptApi.fetch."""
+    """Drive main._fetch_transcript_sync against stubbed YouTube calls.
 
-    def _run(behaviour, **env):
+    `behaviour(video_id)` stands in for downloading the chosen track: it returns
+    snippets, or raises what the library would. The video offers one manually
+    created English track unless `tracks` says otherwise.
+    """
+
+    def _run(behaviour, tracks=None, **env):
         main = fresh_main(**env)
-        from youtube_transcript_api import YouTubeTranscriptApi
+        from youtube_transcript_api import Transcript, YouTubeTranscriptApi
 
         monkeypatch.setattr(
-            YouTubeTranscriptApi, "fetch", lambda self, vid, languages=None: behaviour(vid)
+            YouTubeTranscriptApi,
+            "list",
+            lambda self, vid: tracks if tracks is not None else _tracks(_track("en", video_id=vid), video_id=vid),
+        )
+        monkeypatch.setattr(
+            Transcript, "fetch", lambda self, preserve_formatting=False: behaviour(self.video_id)
         )
         return main
 
@@ -165,18 +197,19 @@ def test_transport_retries_are_disabled_on_the_session(fresh_main, monkeypatch):
     is handed, on top of its own re-fetch loop — so the setting was applied twice
     and one call could run for (1 + retries) x the per-call timeout."""
     main = fresh_main(WEBSHARE_PROXY_USERNAME="u", WEBSHARE_PROXY_PASSWORD="p", WEBSHARE_RETRIES=5)
-    from youtube_transcript_api import YouTubeTranscriptApi
+    from youtube_transcript_api import Transcript, YouTubeTranscriptApi
 
     seen = {}
 
-    def capture(self, vid, languages=None):
+    def capture(self, vid):
         seen["totals"] = {
             prefix: self._fetcher._http_client.get_adapter(prefix + "x").max_retries.total
             for prefix in ("http://", "https://")
         }
-        return [_Snippet("ok text")]
+        return _tracks(_track("en"))
 
-    monkeypatch.setattr(YouTubeTranscriptApi, "fetch", capture)
+    monkeypatch.setattr(YouTubeTranscriptApi, "list", capture)
+    monkeypatch.setattr(Transcript, "fetch", lambda self, preserve_formatting=False: [_Snippet("ok text")])
     main._fetch_transcript_sync("dQw4w9WgXcQ")
     assert seen["totals"] == {"http://": 0, "https://": 0}
 
@@ -195,9 +228,48 @@ def test_the_session_is_closed_even_when_the_fetch_raises(fresh_main, monkeypatc
     monkeypatch.setattr(main._TimeoutSession, "close", spy)
     monkeypatch.setattr(
         YouTubeTranscriptApi,
-        "fetch",
-        lambda self, vid, languages=None: (_ for _ in ()).throw(RuntimeError("boom")),
+        "list",
+        lambda self, vid: (_ for _ in ()).throw(RuntimeError("boom")),
     )
     with pytest.raises(HTTPException):
         main._fetch_transcript_sync("dQw4w9WgXcQ")
     assert closed, "the session was not closed on the failure path"
+
+
+# --- Which caption track gets read -------------------------------------------
+
+
+def test_a_video_captioned_only_in_another_language_is_still_read(patched_fetch):
+    """Asking for English alone reported this video as having no captions at
+    all. That was false, and it turned away exactly the global-history videos
+    the site is for."""
+    main = patched_fetch(lambda vid: [_Snippet("Rom fiel 476.")], tracks=_tracks(_track("de")))
+    assert main._fetch_transcript_sync(VIDEO) == "Rom fiel 476."
+
+
+@pytest.mark.parametrize(
+    "available,expected",
+    [
+        # English wins even when auto-generated: the analysis is written in English.
+        ([("de", False), ("en", True)], "en"),
+        ([("en-GB", False), ("en", False)], "en"),
+        # Regional English is not in the preferred list, but still beats every
+        # other language.
+        ([("de", False), ("en-IN", True)], "en-IN"),
+        # Otherwise a human-made track beats speech recognition.
+        ([("fr", True), ("de", False)], "de"),
+        ([("ja", True)], "ja"),
+    ],
+)
+def test_the_best_available_track_is_chosen(fresh_main, available, expected):
+    main = fresh_main()
+    offered = _tracks(*(_track(code, generated) for code, generated in available))
+    assert main._choose_transcript(offered).language_code == expected
+
+
+def test_a_video_with_no_tracks_at_all_is_still_404(patched_fetch):
+    """The fallback must not turn 'nothing to read' into some other error."""
+    main = patched_fetch(lambda vid: [_Snippet("never fetched")], tracks=_tracks())
+    with pytest.raises(HTTPException) as exc:
+        main._fetch_transcript_sync(VIDEO)
+    assert exc.value.status_code == 404

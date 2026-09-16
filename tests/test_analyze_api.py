@@ -107,6 +107,17 @@ def test_get_is_not_allowed(live):
     assert c.get("/api/analyze").status_code == 405
 
 
+@pytest.mark.parametrize("title", ["Anglo-Saxon", "Greco-Roman", "Sino-Soviet"])
+def test_hyphenated_one_word_titles_are_analysed_as_titles(live, title):
+    """Eleven characters with a hyphen matched the bare-id shape: as a title it
+    was refused as "a YouTube video ID", and as a URL it cost a slot and a proxy
+    fetch to report the video unavailable."""
+    _, c = live
+    r = c.post("/api/analyze", json={"title": title})
+    assert r.status_code == 200
+    assert r.json()["basis"] == "title"
+
+
 # --------------------------------------------------------------------------
 # Response shape
 # --------------------------------------------------------------------------
@@ -447,3 +458,112 @@ def test_an_unlisted_model_bills_at_the_priciest_known_rate(client):
     module, _ = client(GROK_MODEL="grok-99-unreleased")
     known = max(module.MODEL_PRICING.values(), key=lambda p: p[1])
     assert module._estimate_cost("grok-99-unreleased", 0, 1_000_000) == pytest.approx(known[1])
+
+
+# --- What gets charged, and what is checked before anything is spent ---------
+
+EMPTY_ANALYSIS = '{"claims": [], "overall_assessment": "x", "sources_used": []}'
+MILLION_IN = {"prompt_tokens": 1_000_000, "completion_tokens": 0}
+
+
+def _xai_answers(module, response):
+    """Stub the shared xAI client with one canned HTTP response."""
+
+    async def post(*args, **kwargs):
+        return response
+
+    module._grok_client = type("Stub", (), {"post": staticmethod(post)})()
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"choices": [{"finish_reason": "length", "message": {"content": '{"claims": ['}}]},
+        {"choices": [{"finish_reason": "stop", "message": {"content": ""}}]},
+        {"choices": [{"finish_reason": "stop", "message": {"content": "no json here"}}]},
+        {"choices": []},
+    ],
+    ids=["cut-off", "empty", "malformed", "no-choices"],
+)
+def test_replies_xai_billed_are_charged_even_when_unusable(client, body):
+    """xAI bills a 200 whatever it holds. These failures were raised before the
+    spend was banked, so a reply cut off at GROK_MAX_TOKENS - the most expensive
+    kind - was recorded as nothing, and could be repeated without limit."""
+    import httpx
+
+    module, c = client(XAI_API_KEY="k", GROK_MODEL="grok-4.3", RATE_LIMIT_REQUESTS=0)
+    _xai_answers(module, httpx.Response(200, json={**body, "usage": MILLION_IN}))
+
+    assert c.post("/api/analyze", json={"title": "The Fall of Rome"}).status_code == 502
+    budget = c.get("/health").json()["budget"]
+    assert budget["calls_today"] == 1
+    assert budget["spent_today_usd"] == pytest.approx(1.25)
+
+
+def test_reasoning_tokens_are_charged_as_output(client):
+    """xAI reports reasoning outside completion_tokens (OpenAI folds it in) and
+    bills it as output. Reading completion_tokens alone priced it at nothing."""
+    import httpx
+
+    module, c = client(XAI_API_KEY="k", GROK_MODEL="grok-4.3", RATE_LIMIT_REQUESTS=0)
+    _xai_answers(module, httpx.Response(200, json={
+        "choices": [{"message": {"content": EMPTY_ANALYSIS}}],
+        "usage": {"prompt_tokens": 0, "completion_tokens": 0,
+                  "completion_tokens_details": {"reasoning_tokens": 1_000_000}},
+    }))
+
+    assert c.post("/api/analyze", json={"title": "The Fall of Rome"}).status_code == 200
+    # 1M output-priced tokens on grok-4.3 is exactly its $2.50 output rate.
+    assert c.get("/health").json()["budget"]["spent_today_usd"] == pytest.approx(2.50)
+
+
+def test_a_malformed_reasoning_breakdown_does_not_break_accounting(client):
+    import httpx
+
+    module, c = client(XAI_API_KEY="k", GROK_MODEL="grok-4.3", RATE_LIMIT_REQUESTS=0)
+    _xai_answers(module, httpx.Response(200, json={
+        "choices": [{"message": {"content": EMPTY_ANALYSIS}}],
+        "usage": {**MILLION_IN, "completion_tokens_details": "unavailable"},
+    }))
+
+    assert c.post("/api/analyze", json={"title": "The Fall of Rome"}).status_code == 200
+    assert c.get("/health").json()["budget"]["spent_today_usd"] == pytest.approx(1.25)
+
+
+def test_a_spent_budget_fetches_no_transcript(client, monkeypatch):
+    """The budget was only checked inside call_grok, after the transcript had
+    been pulled through the paid proxy - and that 503 refunded the slot, so once
+    the day's budget was gone every link fetched a transcript for free."""
+    import httpx
+
+    module, c = client(XAI_API_KEY="k", GROK_MODEL="grok-4.3", DAILY_BUDGET_USD=1.0,
+                       RATE_LIMIT_REQUESTS=0, GLOBAL_RATE_LIMIT_REQUESTS=0)
+    fetches = []
+    monkeypatch.setattr(
+        module, "_fetch_transcript_sync",
+        lambda vid: fetches.append(vid) or "Rome fell in 476 AD. " * 10,
+    )
+    _xai_answers(module, httpx.Response(200, json={
+        "choices": [{"message": {"content": EMPTY_ANALYSIS}}], "usage": MILLION_IN,
+    }))
+    assert c.post("/api/analyze", json={"url": URL}).status_code == 200  # spends $1.25 of $1
+    fetches.clear()
+
+    for _ in range(3):
+        r = c.post("/api/analyze", json={"url": URL})
+        assert r.status_code == 503
+        assert "budget" in r.json()["detail"].lower()
+    assert fetches == [], "transcripts were fetched for analyses that could never run"
+
+
+def test_a_deploy_without_a_key_fetches_no_transcript(client, monkeypatch):
+    module, c = client(ANALYSIS_ENABLED=1)
+    fetches = []
+    monkeypatch.setattr(
+        module, "_fetch_transcript_sync", lambda vid: fetches.append(vid) or "word " * 50
+    )
+
+    r = c.post("/api/analyze", json={"url": URL})
+    assert r.status_code == 503
+    assert r.json()["reason"] == "no_api_key"
+    assert fetches == []

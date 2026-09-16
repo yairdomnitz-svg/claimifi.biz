@@ -90,6 +90,14 @@ def test_the_system_prompt_marks_the_transcript_as_untrusted(grok):
     assert "untrusted" in system.lower()
 
 
+def test_the_system_prompt_asks_for_english_whatever_the_transcript_language(grok):
+    """Transcripts are no longer English-only. The page still is."""
+    main, sent, loop = grok(_reply(json.dumps(ANALYSIS)))
+    _call(main, loop)
+    system = sent["json"]["messages"][0]["content"]
+    assert "in English" in system
+
+
 # --------------------------------------------------------------------------
 # Failure surfaces
 # --------------------------------------------------------------------------
@@ -113,11 +121,68 @@ def test_a_rejected_key_is_502_not_503(grok):
     assert exc.value.status_code == 502
 
 
-def test_upstream_rate_limiting_is_passed_through(grok):
-    main, _, loop = grok(httpx.Response(429, json={"error": "slow down"}))
+def test_upstream_rate_limiting_is_a_503_not_the_callers_429(grok):
+    """xAI throttling this service is the service failing. Passed through as a
+    429 it read as the visitor's own per-IP limit, and cost them a slot: 429 is
+    not a refundable status."""
+    main, _, loop = grok(
+        httpx.Response(429, json={"error": "slow down"}, headers={"retry-after": "12"})
+    )
     with pytest.raises(HTTPException) as exc:
         _call(main, loop)
-    assert exc.value.status_code == 429
+    assert exc.value.status_code == 503
+    assert exc.value.headers["Retry-After"] == "12"
+
+
+@pytest.mark.parametrize(
+    "upstream,expected",
+    [(None, "30"), ("soon", "30"), ("0", "30"), ("-5", "30"), ("86400", "3600")],
+)
+def test_upstream_retry_after_is_forwarded_only_when_sane(grok, upstream, expected):
+    headers = {} if upstream is None else {"retry-after": upstream}
+    main, _, loop = grok(httpx.Response(429, json={"error": "slow down"}, headers=headers))
+    with pytest.raises(HTTPException) as exc:
+        _call(main, loop)
+    assert exc.value.headers["Retry-After"] == expected
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        _reply('{"claims": [', finish_reason="length"),
+        _reply(""),
+        _reply("no json anywhere in this"),
+        httpx.Response(200, json={"unexpected": True}),
+        httpx.Response(200, text="<html>not json</html>"),
+    ],
+    ids=["cut-off", "empty", "malformed", "wrong-shape", "not-json"],
+)
+def test_failures_after_a_200_are_marked_billed(grok, response):
+    """xAI bills every 200, whatever it holds. analyze() keeps the caller's slot
+    when it sees this marker; without it, a reply cut off at GROK_MAX_TOKENS -
+    the most expensive failure there is - was free to repeat."""
+    main, _, loop = grok(response)
+    with pytest.raises(HTTPException) as exc:
+        _call(main, loop)
+    assert exc.value.status_code == 502
+    assert getattr(exc.value, "billed", False) is True
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(401, json={"error": "invalid"}),
+        httpx.Response(429, json={"error": "slow down"}),
+        httpx.Response(500, text="boom"),
+        httpx.ConnectError("refused"),
+    ],
+    ids=["rejected-key", "throttled", "server-error", "unreachable"],
+)
+def test_failures_xai_did_not_bill_are_not_marked(grok, response):
+    main, _, loop = grok(response)
+    with pytest.raises(HTTPException) as exc:
+        _call(main, loop)
+    assert not getattr(exc.value, "billed", False)
 
 
 def test_other_upstream_errors_do_not_leak_the_body(grok):
