@@ -4,8 +4,9 @@
     {
       "name": "claimifi",
       "runtimeExecutable": "python",
-      "runtimeArgs": ["-m", "uvicorn", "main:app", "--host", "127.0.0.1", "--port", "8099"],
-      "port": 8099
+      "runtimeArgs": ["-c", "import os, uvicorn; uvicorn.run('main:app', host='127.0.0.1', port=int(os.environ.get('PORT', '8099')))"],
+      "port": 8099,
+      "autoPort": true
     }
   ]
 }
