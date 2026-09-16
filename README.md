@@ -37,7 +37,7 @@ No Dockerfile and no `railway.toml` are needed (Config-as-Code is deprecated).
 
 | Variable | Required | Notes |
 | --- | --- | --- |
-| `ANALYSIS_ENABLED` | **Yes, to analyse anything** | Master switch for everything that costs money. **Defaults to `false`** — `/api/analyze` returns `503` with `"reason": "analysis_disabled"` and the page says analysis is paused. Set it to `true` to turn the analyzer on. |
+| `ANALYSIS_ENABLED` | No | Master switch for everything that costs money. Defaults to `true`. Set it to `false` to pause: `/api/analyze` then returns `503` with `"reason": "analysis_disabled"` and the page says analysis is paused. |
 | `DAILY_BUDGET_USD` | No | Hard ceiling on estimated spend per UTC day. Default `2.0`; `0` disables. Costed from xAI's own `usage` block against `MODEL_PRICING`, so a title check and a 25k-token transcript are not priced alike. In-process, so it resets on redeploy — the request ceilings stay underneath it. |
 | `XAI_API_KEY` | **Yes** | From https://console.x.ai. Without it `/api/analyze` returns `503` with `"reason": "no_api_key"` and the page says so. There is no demo mode: a fact-checker must never show invented verdicts. |
 | `GROK_MODEL` | No | Defaults to `grok-4.3`. `grok-4` is no longer on xAI's published model list and the dated `grok-4-0709` snapshot was retired on 2026-05-15, so pin a documented id. |

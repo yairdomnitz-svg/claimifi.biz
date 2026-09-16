@@ -118,11 +118,11 @@ XAI_BASE_URL = os.getenv("XAI_BASE_URL", "https://api.x.ai/v1").rstrip("/")
 # legacy alias happens to resolve that day.
 GROK_MODEL = os.getenv("GROK_MODEL", "grok-4.3").strip() or "grok-4.3"
 
-# Master switch for everything that costs money. Default off: /api/analyze is
-# unauthenticated, and a deploy that starts spending the moment a key is present
-# is the wrong default for a key that is already live in production. Turning it
-# on is a deliberate act.
-ANALYSIS_ENABLED = _env_bool("ANALYSIS_ENABLED", False)
+# Master switch for everything that costs money. Default on, so a deploy with a
+# key analyses without further setup. Set ANALYSIS_ENABLED=false to pause without
+# a code change; while on, spend stays bounded by DAILY_BUDGET_USD and the rate
+# limits.
+ANALYSIS_ENABLED = _env_bool("ANALYSIS_ENABLED", True)
 
 # Hard ceiling on spend per UTC day, in dollars. The rate limits cap *requests*;
 # this caps the bill, which is the thing actually worth bounding. 0 disables.

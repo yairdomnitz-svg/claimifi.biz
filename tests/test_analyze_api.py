@@ -326,9 +326,15 @@ def test_saturated_transcript_pool_rejects_rather_than_queueing(client, monkeypa
 # --- Kill switch and daily budget -------------------------------------------
 
 
-def test_analysis_is_off_by_default(client):
-    """An unauthenticated endpoint that spends money must be opted into."""
+def test_analysis_is_on_by_default(client):
+    """A deploy with a key analyses without any further opt-in."""
     module, c = client(XAI_API_KEY="k")
+    assert module.ANALYSIS_ENABLED is True
+    assert c.get("/api/config").json()["status"] == "live"
+
+
+def test_analysis_can_be_paused(client):
+    module, c = client(XAI_API_KEY="k", ANALYSIS_ENABLED=0)
     assert module.ANALYSIS_ENABLED is False
     r = c.post("/api/analyze", json={"title": "The Fall of Rome"})
     assert r.status_code == 503
@@ -337,7 +343,7 @@ def test_analysis_is_off_by_default(client):
 
 def test_paused_is_distinct_from_unconfigured(client):
     """Two different 503s: one is a deliberate pause, one an unfinished deploy."""
-    _, paused = client(XAI_API_KEY="k")
+    _, paused = client(XAI_API_KEY="k", ANALYSIS_ENABLED=0)
     assert paused.get("/api/config").json()["status"] == "paused"
 
     _, unconfigured = client(ANALYSIS_ENABLED=1)
@@ -350,7 +356,7 @@ def test_paused_is_distinct_from_unconfigured(client):
 
 def test_pausing_costs_the_visitor_nothing(client):
     """No rate-limit slot, no transcript fetch: there is nothing to meter."""
-    module, c = client(XAI_API_KEY="k", RATE_LIMIT_REQUESTS=2)
+    module, c = client(XAI_API_KEY="k", RATE_LIMIT_REQUESTS=2, ANALYSIS_ENABLED=0)
 
     def explode(*args, **kwargs):  # pragma: no cover - must never run
         raise AssertionError("a paused service fetched a transcript")
