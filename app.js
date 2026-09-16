@@ -213,7 +213,7 @@
         : '') +
       '<div class="panel-body">' +
         '<div class="label">' + (titleOnly ? 'Title' : 'Video') + '</div>' +
-        '<p style="font-weight:500">' + esc(data.video_title || 'Unknown') + '</p>' +
+        '<p style="font-weight:700">' + esc(data.video_title || 'Unknown') + '</p>' +
         (data.video_id
           ? '<p style="font-size:.82rem;color:var(--text-3);margin-top:4px">ID: ' + esc(data.video_id) + '</p>' : '') +
       '</div>' +

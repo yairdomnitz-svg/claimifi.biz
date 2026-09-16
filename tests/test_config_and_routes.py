@@ -169,7 +169,7 @@ def test_pages_carry_a_content_hash_so_a_deploy_busts_caches(client):
 
     _, c = client()
     digest = hashlib.sha256()
-    for name in ("styles.css", "app.js"):
+    for name in ("styles.css", "app.js", "favicon.svg"):
         digest.update((REPO / name).read_bytes())
     expected = digest.hexdigest()[:10]
 
@@ -178,6 +178,9 @@ def test_pages_carry_a_content_hash_so_a_deploy_busts_caches(client):
         assert "__ASSET_V__" not in html
         assert f"/styles.css?v={expected}" in html
         assert f"/app.js?v={expected}" in html
+        # The header draws the logo from favicon.svg, which caches for a day.
+        assert f'class="brand-mark" src="/favicon.svg?v={expected}"' in html
+        assert f'rel="icon" href="/favicon.svg?v={expected}"' in html
 
 
 def test_the_hash_changes_when_an_asset_changes(fresh_main, tmp_path, monkeypatch):
@@ -188,14 +191,23 @@ def test_the_hash_changes_when_an_asset_changes(fresh_main, tmp_path, monkeypatc
 
     shadow = tmp_path / "site"
     shadow.mkdir()
-    for name in ("styles.css", "app.js", "index.html", "app.html"):
+    for name in ("styles.css", "app.js", "favicon.svg", "index.html", "app.html"):
         (shadow / name).write_bytes((REPO / name).read_bytes())
-    (shadow / "app.js").write_text("/* changed */\n", encoding="utf-8")
-
     monkeypatch.setattr(module, "FRONTEND_DIR", shadow)
-    module._asset_version.cache_clear()
+
     try:
-        assert module._asset_version() != before
+        module._asset_version.cache_clear()
+        assert module._asset_version() == before, "an identical copy must hash the same"
+
+        # A logo-only change counts too: the header renders the mark from it.
+        (shadow / "favicon.svg").write_text("<svg/>", encoding="utf-8")
+        module._asset_version.cache_clear()
+        after_logo = module._asset_version()
+        assert after_logo != before
+
+        (shadow / "app.js").write_text("/* changed */\n", encoding="utf-8")
+        module._asset_version.cache_clear()
+        assert module._asset_version() not in (before, after_logo)
     finally:
         module._asset_version.cache_clear()
 

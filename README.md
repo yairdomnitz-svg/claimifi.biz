@@ -13,7 +13,7 @@ index.html             Landing page (/)
 app.html               Analyzer (/app)
 styles.css             Shared stylesheet
 app.js                 Shared analyzer logic
-favicon.svg            Tab icon
+favicon.svg            Logo mark: tab icon and header brand
 apple-touch-icon.png   iOS home-screen icon
 og-image.png           1200x630 social preview
 google*.html           Search Console verification file
@@ -24,8 +24,9 @@ Procfile               Start command fallback
 ```
 
 There is no build step: the CSS and JS are served as-is. Both pages reference
-them as `/styles.css?v=<hash>`, where the hash is derived from the file contents
-at startup, so a deploy invalidates a visitor's cached copy automatically.
+them as `/styles.css?v=<hash>`, where the hash is derived from the contents of
+the CSS, the JS and the logo at startup, so a deploy invalidates a visitor's
+cached copy automatically.
 
 ## Railway deployment
 

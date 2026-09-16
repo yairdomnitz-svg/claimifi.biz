@@ -1349,14 +1349,16 @@ REVALIDATE_ALWAYS = {"styles.css", "app.js", GOOGLE_VERIFICATION_FILE}
 
 @lru_cache(maxsize=1)
 def _asset_version() -> str:
-    """Short digest of the CSS+JS, used to bust caches across deploys.
+    """Short digest of the CSS, JS and logo, used to bust caches across deploys.
 
     A browser that cached styles.css under a long max-age would otherwise keep
     serving the old file after a deploy. Changing the query string changes the
-    URL, so the stale entry is bypassed without needing a hard refresh.
+    URL, so the stale entry is bypassed without needing a hard refresh. The logo
+    is included because the header renders it from favicon.svg, which caches for
+    a day: without it, a rebrand shows the old mark beside the new styles.
     """
     digest = hashlib.sha256()
-    for name in ("styles.css", "app.js"):
+    for name in ("styles.css", "app.js", "favicon.svg"):
         path = FRONTEND_DIR / name
         if path.is_file():
             digest.update(path.read_bytes())
