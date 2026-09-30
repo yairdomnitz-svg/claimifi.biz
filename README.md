@@ -80,6 +80,8 @@ No Dockerfile and no `railway.toml` are needed (Config-as-Code is deprecated).
 | `WEBSHARE_RETRIES` | No | Retries when an exit node is blocked; each one rotates to a fresh IP. Default `2`. Webshare's own default is 10, which can occupy a worker thread for two minutes. |
 | `WEBSHARE_IP_LOCATIONS` | No | Country codes (`nl,de,gb`) to pin the exit pool nearer the deploy region. Empty uses the full pool. |
 | `PROXY_URL` | See below | Alternative to Webshare: any `http://user:pass@host:port`. |
+| `SUPABASE_URL` | For accounts | The Supabase project URL, `https://<ref>.supabase.co`. The account API stays off until this and `SUPABASE_SECRET_KEY` are both set. See [Accounts](#accounts-supabase). |
+| `SUPABASE_SECRET_KEY` | For accounts | A **secret** key (`sb_secret_...`), used only by the server. It is the one key type Supabase accepts each visitor's IP from; with any other key, Supabase's per-IP auth limits are shared by every visitor to the site. |
 
 Do **not** set `PORT` yourself — Railway injects it and must match the domain's target port.
 
@@ -131,6 +133,55 @@ touches YouTube.
 
 `GET /health` reports `transcript_proxy_configured` and `transcript_proxy_kind` so you can confirm it took effect.
 
+### Accounts (Supabase)
+
+The server side of email-and-password accounts is in place: sign-up with email
+confirmation, log in and out, and password reset, through Supabase Auth. This server
+makes every call to Supabase and keeps the session in HttpOnly cookies, so the browser
+never sees a token. **The site does not use it yet** — there are no account pages or
+links — and until both variables are set every `/api/auth` route answers `503` with
+`"reason": "auth_unavailable"`, and `/auth/confirm` answers `404`.
+
+To connect Supabase:
+
+1. Create a project at https://supabase.com. The free tier is enough.
+2. In **Authentication → URL Configuration**, set **Site URL** to `https://claimifi.biz`
+   and add `https://claimifi.biz/auth/callback` under **Redirect URLs**. Add
+   `http://localhost:8000/auth/callback` too for local work.
+3. In **Project Settings → API Keys**, create a **secret** key. In Railway, set
+   `SUPABASE_URL` to the project URL and `SUPABASE_SECRET_KEY` to that key, then deploy.
+   `GET /health` should report `auth_configured: true` and `auth_forwards_client_ip: true`.
+4. In **Authentication → Emails → SMTP Settings**, connect an email provider such as
+   Resend, Postmark or SendGrid. Supabase's built-in sender is only meant for testing:
+   it sends about **2 emails an hour** for the whole project, which a few sign-ups and
+   password resets use up.
+
+New projects require email confirmation, so an account cannot log in until its link is
+opened. Supabase's default email templates work unchanged. To keep links on this site's
+own domain instead, point the templates at `/auth/confirm`:
+
+- **Confirm signup:** `{{ .SiteURL }}/auth/confirm?token_hash={{ .TokenHash }}&type=email`
+- **Reset password:** `{{ .SiteURL }}/auth/confirm?token_hash={{ .TokenHash }}&type=recovery`
+
+Every email link is built from `SITE_URL`, so a preview deploy on another address needs
+its own `SITE_URL`, and that address's `/auth/callback` added to the Redirect URLs.
+Passwords need at least 8 characters, plus whatever stricter rules are set in Supabase.
+
+**Building the account pages.** Email links end on three paths, and the frontend has to
+serve them:
+
+- `/auth/callback` — Supabase's default templates arrive here with the new session in
+  the URL fragment (`#access_token=…&refresh_token=…&type=recovery`). Remove it from the
+  address bar, then `POST` both tokens to `/api/auth/session`, which checks them with
+  Supabase and sets the cookies. A failed link arrives with `error_code` in the fragment,
+  or in the query when it came through `/auth/confirm`.
+- `/reset-password` — where a reset link ends up, signed in: `POST /api/auth/password`.
+- `/account` — where a confirmation link ends up (`?welcome=1`).
+
+Every `POST` takes JSON, from the site's own origin. Errors carry a string `detail` to
+show as-is, and a `reason` code for the page to branch on (`email_not_confirmed`,
+`invalid_credentials`, `weak_password`, `same_password`, `otp_expired`, …).
+
 ## API
 
 | Endpoint | Purpose |
@@ -140,6 +191,14 @@ touches YouTube.
 | `GET /health` | Liveness + configuration status |
 | `GET /api/config` | Tells the frontend whether live analysis is available |
 | `POST /api/analyze` | `{"url": "..."}` (max 2000 chars) or `{"title": "..."}` (3–300 chars) |
+| `GET /api/auth/me` | Whether accounts are on, and who is signed in |
+| `POST /api/auth/signup` | `{"email", "password"}`; sends the confirmation email |
+| `POST /api/auth/login` | `{"email", "password"}`; sets the session cookies |
+| `POST /api/auth/logout` | Ends the session in this browser |
+| `POST /api/auth/forgot-password` | `{"email"}`; sends a reset link, with the same reply whether or not the account exists |
+| `POST /api/auth/password` | `{"password"}`; sets a new password for whoever is signed in |
+| `POST /api/auth/resend` | `{"email"}`; sends the confirmation email again |
+| `POST /api/auth/session`, `GET /auth/confirm` | Turn an email link into a session |
 | `GET /robots.txt`, `/sitemap.xml` | SEO |
 
 `POST /api/analyze` failure codes: `400` malformed input, or a bare video ID sent as a

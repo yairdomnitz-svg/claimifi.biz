@@ -16,6 +16,7 @@ Then open http://localhost:8000
 from __future__ import annotations
 
 import asyncio
+import base64
 import concurrent.futures
 import contextlib
 import hashlib
@@ -28,6 +29,7 @@ import time
 import unicodedata
 from collections import OrderedDict, deque
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Deque, Dict, List, Optional
@@ -35,10 +37,16 @@ from typing import Any, Deque, Dict, List, Optional
 import httpx
 import requests
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    JSONResponse,
+    RedirectResponse,
+    Response,
+)
 from pydantic import BaseModel, Field
 
 load_dotenv()
@@ -214,6 +222,20 @@ WEBSHARE_IP_LOCATIONS = [
     if loc.strip()
 ]
 
+# Optional accounts through Supabase Auth: email and password, with password
+# reset. Both must be set. Without them every /api/auth route answers 503 and
+# the pages keep their account links hidden, so a deploy with no Supabase
+# project looks exactly as it did before accounts existed.
+SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip().rstrip("/")
+# Meant to be a secret key (sb_secret_...), which never leaves this server. It is
+# the only kind Supabase accepts Sb-Forwarded-For from, and that header matters:
+# every Auth call leaves from this server's address, so without it the per-IP
+# limits on sign-ups, sign-ins and reset emails are one allowance shared by
+# every visitor at once. A publishable or legacy key works, with that limit.
+SUPABASE_SECRET_KEY = os.getenv("SUPABASE_SECRET_KEY", "").strip()
+AUTH_ENABLED = bool(SUPABASE_URL and SUPABASE_SECRET_KEY)
+AUTH_FORWARDS_CLIENT_IP = AUTH_ENABLED and SUPABASE_SECRET_KEY.startswith("sb_secret_")
+
 TRUSTED_SOURCES = [
     "historians.org", "oah.org", "history.ac.uk", "iamhist.net",
     "jstor.org", "muse.jhu.edu", "archives.gov", "docsteach.org",
@@ -243,10 +265,15 @@ _grok_client: Optional[httpx.AsyncClient] = None
 _transcript_pool: Optional[concurrent.futures.ThreadPoolExecutor] = None
 _transcript_slots: Optional[asyncio.Semaphore] = None
 
+# Supabase Auth gets its own client: an analysis can hold a connection for two
+# minutes, and a sign-in should not queue behind twenty of them.
+_auth_client: Optional[httpx.AsyncClient] = None
+AUTH_TIMEOUT = 15.0
+
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    global _grok_client, _transcript_pool, _transcript_slots
+    global _grok_client, _transcript_pool, _transcript_slots, _auth_client
 
     # Held locally as well as globally, so shutdown closes exactly what this
     # lifespan opened. Reading the globals back would tear down a *later*
@@ -258,9 +285,24 @@ async def lifespan(_app: FastAPI):
     pool = concurrent.futures.ThreadPoolExecutor(
         max_workers=TRANSCRIPT_WORKERS, thread_name_prefix="transcript"
     )
+    auth_client = (
+        httpx.AsyncClient(
+            timeout=httpx.Timeout(AUTH_TIMEOUT, connect=5.0),
+            limits=httpx.Limits(max_connections=20),
+        )
+        if AUTH_ENABLED
+        else None
+    )
+    if AUTH_ENABLED and not AUTH_FORWARDS_CLIENT_IP:
+        log.warning(
+            "SUPABASE_SECRET_KEY is not a secret key (sb_secret_...), so Supabase "
+            "cannot be told each visitor's IP: its per-IP auth limits will be "
+            "shared by every visitor to this site."
+        )
     _grok_client = client
     _transcript_pool = pool
     _transcript_slots = asyncio.Semaphore(TRANSCRIPT_WORKERS)
+    _auth_client = auth_client
     try:
         yield
     finally:
@@ -269,7 +311,11 @@ async def lifespan(_app: FastAPI):
         if _transcript_pool is pool:
             _transcript_pool = None
             _transcript_slots = None
+        if _auth_client is auth_client:
+            _auth_client = None
         await client.aclose()
+        if auth_client is not None:
+            await auth_client.aclose()
         # wait=False: an abandoned fetch can still be mid-request, and blocking
         # here would hold the container open through a redeploy.
         pool.shutdown(wait=False, cancel_futures=True)
@@ -332,6 +378,12 @@ SECURITY_HEADERS = {
 }
 
 
+def _request_is_https(request: Request) -> bool:
+    """Whether the visitor's own connection was HTTPS, as the edge proxy saw it."""
+    forwarded_proto = request.headers.get("x-forwarded-proto", "").split(",")[0].strip()
+    return (forwarded_proto or request.url.scheme) == "https"
+
+
 @app.middleware("http")
 async def security_headers(request: Request, call_next):
     """Attach the headers that make the analyzer's innerHTML rendering safe.
@@ -345,8 +397,7 @@ async def security_headers(request: Request, call_next):
         response.headers.setdefault(header, value)
     # HSTS only where it means anything. Browsers ignore it over plain HTTP, but
     # sending it from a local dev server is still a claim this app cannot honour.
-    forwarded_proto = request.headers.get("x-forwarded-proto", "").split(",")[0].strip()
-    if (forwarded_proto or request.url.scheme) == "https":
+    if _request_is_https(request):
         response.headers.setdefault(
             "Strict-Transport-Security", "max-age=31536000; includeSubDomains"
         )
@@ -572,15 +623,8 @@ def _client_ip(request: Request) -> str:
     return request.client.host if request.client else "unknown"
 
 
-def _bucket_key(ip: str) -> str:
-    """Collapse an address to the unit a single actor plausibly controls.
-
-    A residential IPv6 customer is handed a whole /64 and can pick any address
-    inside it at will, so keying on the exact address hands out an effectively
-    unlimited number of fresh quotas. IPv4 is allocated one address at a time,
-    so it keys as-is. Anything unparseable shares one bucket rather than
-    becoming a distinct identity.
-    """
+def _parse_client_address(ip: str) -> Optional[Any]:
+    """An X-Forwarded-For hop as an IP address, or None if it is not one."""
     candidate = ip.strip()
     # Some proxies append the source port, in "1.2.3.4:5678" or "[2001:db8::1]:5678"
     # form. Dropping it here keeps those callers as distinct identities instead of
@@ -593,15 +637,27 @@ def _bucket_key(ip: str) -> str:
     try:
         addr = ipaddress.ip_address(candidate)
     except ValueError:
-        return "unparsed"
+        return None
 
     # An IPv4 client can reach a dual-stack listener as ::ffff:1.2.3.4. Left as
     # IPv6 it would be masked to /64 — which is ::, the SAME bucket for every
     # IPv4 caller on earth, so one of them could lock out all the others.
+    return getattr(addr, "ipv4_mapped", None) or addr
+
+
+def _bucket_key(ip: str) -> str:
+    """Collapse an address to the unit a single actor plausibly controls.
+
+    A residential IPv6 customer is handed a whole /64 and can pick any address
+    inside it at will, so keying on the exact address hands out an effectively
+    unlimited number of fresh quotas. IPv4 is allocated one address at a time,
+    so it keys as-is. Anything unparseable shares one bucket rather than
+    becoming a distinct identity.
+    """
+    addr = _parse_client_address(ip)
+    if addr is None:
+        return "unparsed"
     if addr.version == 6:
-        mapped = getattr(addr, "ipv4_mapped", None)
-        if mapped is not None:
-            return str(mapped)
         return str(ipaddress.ip_network(f"{addr}/64", strict=False).network_address)
     return str(addr)
 
@@ -1431,6 +1487,605 @@ def _normalize_claims(analysis: Dict[str, Any]) -> List[Claim]:
 
 
 # ---------------------------------------------------------------------------
+# Accounts (Supabase Auth)
+# ---------------------------------------------------------------------------
+# The API for email-and-password accounts, ready for account pages to be built
+# on; no page calls it yet. The browser never talks to Supabase and never holds a
+# token. This server makes every Auth call and keeps the session in two HttpOnly
+# cookies, so pages keep their same-origin-only CSP, and whatever later depends
+# on who is signed in - a paid tier - can trust what it reads here rather than
+# what a page says.
+ACCESS_COOKIE = "claimifi_access"
+REFRESH_COOKIE = "claimifi_refresh"
+# How long a visitor stays signed in without coming back. Supabase rotates the
+# refresh token each time it is used, so an active visitor never reaches it.
+SESSION_MAX_AGE = 30 * 86_400
+# The floor is this site's choice. The ceiling is Supabase's own: bcrypt ignores
+# everything past 72.
+PASSWORD_MIN = 8
+PASSWORD_MAX = 72
+# The link types an email can bring to /auth/confirm.
+EMAIL_LINK_TYPES = frozenset({"email", "signup", "recovery", "invite", "magiclink", "email_change"})
+# Where email links end up, so the account pages have to be served at these
+# paths. Supabase's default templates land on the callback with the session in
+# the URL fragment, for that page to hand to POST /api/auth/session.
+AUTH_CALLBACK_PATH = "/auth/callback"
+AUTH_RESET_PATH = "/reset-password"
+AUTH_ACCOUNT_PATH = "/account"
+NO_STORE = {"Cache-Control": "no-store"}
+
+# Supabase's answer to "whose token is this", kept for up to a minute per token,
+# so a signed-in visitor costs one Auth call a minute rather than one per page.
+# A sign-out on another device therefore takes up to a minute to show here; a
+# sign-out through this site drops the entry at once.
+USER_CACHE_SECONDS = 60
+USER_CACHE_MAX = 5_000
+_user_cache: "OrderedDict[str, tuple]" = OrderedDict()
+
+
+class AuthError(HTTPException):
+    """A refusal worded for the visitor, with Supabase's error code as `reason`."""
+
+    def __init__(
+        self,
+        status_code: int,
+        detail: str,
+        reason: Optional[str] = None,
+        headers: Optional[Dict[str, str]] = None,
+    ) -> None:
+        super().__init__(status_code=status_code, detail=detail, headers=headers)
+        self.reason = reason
+
+
+# Supabase's own messages are written for developers ("Invalid login
+# credentials", "Email not confirmed") and some change with project settings.
+# Its error codes are stable, so the wording a visitor sees hangs off those.
+_ALREADY_REGISTERED = (409, "There's already an account with this email. Log in, or reset the password.")
+_AUTH_MESSAGES: Dict[str, tuple] = {
+    "invalid_credentials": (400, "That email and password don't match an account."),
+    "email_not_confirmed": (
+        403,
+        "Confirm your email address first. The link is in the email we sent when you signed up.",
+    ),
+    "user_already_exists": _ALREADY_REGISTERED,
+    "email_exists": _ALREADY_REGISTERED,
+    "same_password": (422, "Choose a password that's different from your current one."),
+    "otp_expired": (400, "This link has expired or has already been used. Request a new one."),
+    "email_address_invalid": (400, "Enter a valid email address."),
+    "signup_disabled": (403, "New accounts can't be created right now."),
+    "email_provider_disabled": (403, "Signing in with email is switched off right now."),
+    "reauthentication_needed": (401, "For your security, log in again before changing your password."),
+    "over_email_send_rate_limit": (
+        429,
+        "Too many emails have been requested just now. Wait a minute, then try again.",
+    ),
+    "over_request_rate_limit": (
+        429,
+        "Too many attempts from this network. Wait a few minutes, then try again.",
+    ),
+}
+# Codes meaning the session in the cookies is over, so the visitor logs in again.
+_SESSION_OVER = frozenset(
+    {
+        "session_not_found",
+        "session_expired",
+        "refresh_token_not_found",
+        "refresh_token_already_used",
+        "bad_jwt",
+        "user_not_found",
+    }
+)
+
+
+def _auth_failure(status: int, body: Any) -> AuthError:
+    body = body if isinstance(body, dict) else {}
+    # Under API version 2024-01-01 the code is a string in `code`. Older replies
+    # put the HTTP status there and the code in `error_code`.
+    code = body.get("code") if isinstance(body.get("code"), str) else body.get("error_code")
+    if not isinstance(code, str):
+        code = "invalid_credentials" if body.get("error") == "invalid_grant" else None
+    if code in _AUTH_MESSAGES:
+        http_status, message = _AUTH_MESSAGES[code]
+        return AuthError(http_status, message, reason=code)
+    if code in _SESSION_OVER:
+        return AuthError(401, "Your session has ended. Log in again.", reason="session_expired")
+    raw = body.get("msg") or body.get("message") or body.get("error_description") or body.get("error")
+    message = _clean_text(raw, 300) if isinstance(raw, str) else ""
+    if status >= 500:
+        log.error("Supabase Auth failed: status=%s code=%s msg=%s", status, code, message)
+        return AuthError(502, "The account service had a problem. Please try again.")
+    if code == "weak_password":
+        # Supabase's own text names the rule this project's settings enforce.
+        return AuthError(422, message or "Choose a stronger password.", reason=code)
+    log.warning("Supabase Auth refused a request: status=%s code=%s msg=%s", status, code, message)
+    return AuthError(
+        status if 400 <= status < 500 else 400,
+        message or "That couldn't be done. Please try again.",
+        reason=code,
+    )
+
+
+async def _auth_call(
+    request: Request,
+    method: str,
+    path: str,
+    *,
+    params: Optional[Dict[str, str]] = None,
+    body: Optional[Dict[str, Any]] = None,
+    token: Optional[str] = None,
+) -> Dict[str, Any]:
+    """One request to Supabase Auth, made on behalf of the visitor behind `request`."""
+    client = _auth_client
+    if not AUTH_ENABLED or client is None:
+        raise AuthError(503, "Accounts aren't switched on yet.", reason="auth_unavailable")
+
+    headers = {"apikey": SUPABASE_SECRET_KEY, "X-Supabase-Api-Version": "2024-01-01"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    if AUTH_FORWARDS_CLIENT_IP:
+        address = _parse_client_address(_client_ip(request))
+        if address is not None:
+            headers["Sb-Forwarded-For"] = str(address)
+
+    try:
+        resp = await client.request(
+            method, f"{SUPABASE_URL}/auth/v1{path}", params=params, json=body, headers=headers
+        )
+    except httpx.TimeoutException as exc:
+        raise AuthError(504, "The account service took too long to answer. Please try again.") from exc
+    except httpx.HTTPError as exc:
+        log.warning("Supabase Auth unreachable (%s)", type(exc).__name__)
+        raise AuthError(502, "Couldn't reach the account service. Please try again.") from exc
+
+    try:
+        data = resp.json() if resp.content else {}
+    except ValueError:
+        data = {}
+    if resp.status_code >= 400:
+        raise _auth_failure(resp.status_code, data)
+    return data if isinstance(data, dict) else {}
+
+
+def _require_same_origin(request: Request) -> None:
+    """Refuse account changes posted from another site.
+
+    The bodies are JSON, which a cross-site form cannot send and a cross-site
+    fetch cannot send without a CORS preflight this app refuses, and the cookies
+    are SameSite=Lax. This is the check that leans on neither staying true.
+    """
+    origin = request.headers.get("origin")
+    if not origin:
+        return
+    scheme = "https" if _request_is_https(request) else request.url.scheme
+    own = f"{scheme}://{request.headers.get('host', '')}"
+    allowed = {own} | {o.rstrip("/") for o in ALLOWED_ORIGINS if o != "*"}
+    if origin.rstrip("/") not in allowed:
+        raise AuthError(403, "That request came from another site, so it was refused.", reason="cross_origin")
+
+
+def _require_auth(request: Request) -> None:
+    if not AUTH_ENABLED:
+        raise AuthError(503, "Accounts aren't switched on yet.", reason="auth_unavailable")
+    _require_same_origin(request)
+
+
+def _email(value: str) -> str:
+    email = value.strip()
+    local, _, domain = email.rpartition("@")
+    if not local or "." not in domain or any(ch.isspace() for ch in email):
+        raise AuthError(400, "Enter a valid email address.", reason="email_address_invalid")
+    return email
+
+
+def _password(value: str) -> str:
+    if len(value) < PASSWORD_MIN:
+        raise AuthError(422, f"Use at least {PASSWORD_MIN} characters for your password.", reason="weak_password")
+    if len(value) > PASSWORD_MAX:
+        raise AuthError(422, f"Use at most {PASSWORD_MAX} characters for your password.", reason="weak_password")
+    return value
+
+
+def _link_target() -> str:
+    # Where Supabase sends someone who opens an email link. It has to be on the
+    # project's Redirect URLs list, or Supabase sends them to its Site URL instead.
+    return f"{SITE_URL}{AUTH_CALLBACK_PATH}"
+
+
+def _safe_next(value: str) -> Optional[str]:
+    """A path on this site to continue to, or None.
+
+    Anything that could leave the site is refused: a scheme, a //host, or a
+    backslash, which some browsers read as a slash.
+    """
+    if (
+        not value
+        or len(value) > 300
+        or not value.startswith("/")
+        or value.startswith("//")
+        or "\\" in value
+        or any(ord(ch) < 32 or ord(ch) == 127 for ch in value)
+    ):
+        return None
+    return value
+
+
+def _public_user(user: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """The part of a Supabase user the pages need. Nothing else leaves the server."""
+    if not user:
+        return None
+    return {"email": user.get("email"), "created_at": user.get("created_at")}
+
+
+def _has_tokens(data: Dict[str, Any]) -> bool:
+    return all(isinstance(data.get(key), str) and data[key] for key in ("access_token", "refresh_token"))
+
+
+def _set_session(response: Response, request: Request, session: Dict[str, Any]) -> None:
+    """Write a Supabase session into the cookies. HttpOnly, so no page script -
+    including anything injected into one - can ever read them."""
+    secure = _request_is_https(request)
+    try:
+        lifetime = int(session.get("expires_in") or 3600)
+    except (TypeError, ValueError):
+        lifetime = 3600
+    for name, value, max_age in (
+        (ACCESS_COOKIE, session["access_token"], max(60, lifetime)),
+        (REFRESH_COOKIE, session["refresh_token"], SESSION_MAX_AGE),
+    ):
+        response.set_cookie(
+            name, value, max_age=max_age, path="/", secure=secure, httponly=True, samesite="lax"
+        )
+
+
+def _clear_session(response: Response, request: Request) -> None:
+    secure = _request_is_https(request)
+    for name in (ACCESS_COOKIE, REFRESH_COOKIE):
+        response.delete_cookie(name, path="/", secure=secure, httponly=True, samesite="lax")
+
+
+def _token_expiry(token: str) -> float:
+    """When an access token lapses, read from its payload without verifying it.
+
+    Only ever used to decide whether to refresh first. Whether a token is
+    genuine is Supabase's call, made in _user_for.
+    """
+    try:
+        segment = token.split(".")[1]
+        claims = json.loads(base64.urlsafe_b64decode(segment + "=" * (-len(segment) % 4)))
+        return float(claims["exp"])
+    except (IndexError, KeyError, TypeError, ValueError, OverflowError):
+        return 0.0
+
+
+def _token_key(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _remember_user(token: str, user: Dict[str, Any]) -> None:
+    ttl = min(USER_CACHE_SECONDS, _token_expiry(token) - time.time())
+    if ttl <= 0:
+        return
+    key = _token_key(token)
+    _user_cache[key] = (user, time.monotonic() + ttl)
+    _user_cache.move_to_end(key)
+    while len(_user_cache) > USER_CACHE_MAX:
+        _user_cache.popitem(last=False)
+
+
+async def _user_for(request: Request, token: str) -> Optional[Dict[str, Any]]:
+    """The user an access token belongs to, or None if Supabase does not accept it."""
+    key = _token_key(token)
+    hit = _user_cache.get(key)
+    if hit is not None and hit[1] > time.monotonic():
+        return hit[0]
+    try:
+        user = await _auth_call(request, "GET", "/user", token=token)
+    except AuthError as exc:
+        _user_cache.pop(key, None)
+        # A token Supabase rejects is simply not a session. Being rate-limited,
+        # or finding Supabase down, says nothing about the token.
+        if exc.status_code in (400, 401, 403, 404):
+            return None
+        raise
+    if not isinstance(user.get("id"), str):
+        return None
+    _remember_user(token, user)
+    return user
+
+
+@dataclass
+class _Session:
+    user: Optional[Dict[str, Any]] = None
+    # The access token to act on the visitor's behalf with.
+    token: Optional[str] = None
+    # A refreshed session, to be written back into the cookies.
+    renewed: Optional[Dict[str, Any]] = None
+    # The cookies held a session that is over, so they should be removed.
+    ended: bool = False
+
+
+async def _current_session(request: Request) -> _Session:
+    """Who the cookies say is signed in, refreshing the session when it is due.
+
+    A refresh token works once. Whatever comes back in `renewed` has to reach
+    the browser through _with_session - error responses included - or the
+    visitor is left holding a spent token and is signed out moments later.
+    """
+    access = request.cookies.get(ACCESS_COOKIE, "")
+    refresh = request.cookies.get(REFRESH_COOKIE, "")
+    # Thirty seconds early, so a token cannot lapse between this check and its use.
+    if access and _token_expiry(access) - time.time() > 30:
+        user = await _user_for(request, access)
+        if user:
+            return _Session(user=user, token=access)
+    if not refresh:
+        return _Session(ended=bool(access))
+
+    try:
+        renewed = await _auth_call(
+            request,
+            "POST",
+            "/token",
+            params={"grant_type": "refresh_token"},
+            body={"refresh_token": refresh},
+        )
+    except AuthError as exc:
+        if exc.status_code >= 500 or exc.status_code == 429:
+            raise
+        return _Session(ended=True)
+    if not _has_tokens(renewed):
+        return _Session(ended=True)
+
+    user = renewed.get("user")
+    if isinstance(user, dict) and isinstance(user.get("id"), str):
+        _remember_user(renewed["access_token"], user)
+    else:
+        try:
+            user = await _user_for(request, renewed["access_token"])
+        except AuthError:
+            # The new tokens still have to be kept, even unconfirmed for now.
+            return _Session(renewed=renewed)
+    if not user:
+        return _Session(ended=True)
+    return _Session(user=user, token=renewed["access_token"], renewed=renewed)
+
+
+def _with_session(response: Response, request: Request, session: _Session) -> Response:
+    if session.renewed:
+        _set_session(response, request, session.renewed)
+    elif session.ended:
+        _clear_session(response, request)
+    return response
+
+
+def _error_json(exc: HTTPException) -> JSONResponse:
+    body: Dict[str, Any] = {"detail": exc.detail}
+    reason = getattr(exc, "reason", None)
+    if reason:
+        body["reason"] = reason
+    return JSONResponse(status_code=exc.status_code, content=body, headers=exc.headers)
+
+
+class LoginBody(BaseModel):
+    email: str = Field(max_length=320)
+    password: str = Field(max_length=1024)
+
+
+class SignupBody(BaseModel):
+    email: str = Field(max_length=320)
+    password: str = Field(max_length=1024)
+
+
+class EmailBody(BaseModel):
+    email: str = Field(max_length=320)
+
+
+class PasswordBody(BaseModel):
+    password: str = Field(max_length=1024)
+
+
+class LinkSessionBody(BaseModel):
+    access_token: str = Field(min_length=20, max_length=8192)
+    refresh_token: str = Field(min_length=1, max_length=2048)
+
+
+@app.get("/api/auth/me")
+async def auth_me(request: Request):
+    """Whether accounts are on, and who is signed in."""
+    if not AUTH_ENABLED:
+        return JSONResponse({"enabled": False, "user": None}, headers=NO_STORE)
+    session = await _current_session(request)
+    response = JSONResponse({"enabled": True, "user": _public_user(session.user)}, headers=NO_STORE)
+    return _with_session(response, request, session)
+
+
+@app.post("/api/auth/signup")
+async def auth_signup(req: SignupBody, request: Request):
+    _require_auth(request)
+    email, password = _email(req.email), _password(req.password)
+    data = await _auth_call(
+        request,
+        "POST",
+        "/signup",
+        params={"redirect_to": _link_target()},
+        body={"email": email, "password": password},
+    )
+    if _has_tokens(data):
+        # Email confirmation is switched off for this project: the account is ready.
+        user = data.get("user") if isinstance(data.get("user"), dict) else None
+        if user:
+            _remember_user(data["access_token"], user)
+        response = JSONResponse({"status": "signed_in", "user": _public_user(user)}, headers=NO_STORE)
+        _set_session(response, request, data)
+        return response
+    # The usual case: a confirmation email is on its way. Supabase answers an
+    # address that already has an account in exactly the same way, so this reply
+    # cannot be used to find out who has signed up.
+    return JSONResponse({"status": "confirmation_sent"}, headers=NO_STORE)
+
+
+@app.post("/api/auth/login")
+async def auth_login(req: LoginBody, request: Request):
+    _require_auth(request)
+    email = _email(req.email)
+    if not req.password:
+        raise AuthError(400, "Enter your password.", reason="validation_failed")
+    data = await _auth_call(
+        request,
+        "POST",
+        "/token",
+        params={"grant_type": "password"},
+        body={"email": email, "password": req.password},
+    )
+    if not _has_tokens(data):
+        raise AuthError(502, "The account service sent an unexpected reply. Please try again.")
+    user = data.get("user") if isinstance(data.get("user"), dict) else None
+    if user:
+        _remember_user(data["access_token"], user)
+    response = JSONResponse({"user": _public_user(user)}, headers=NO_STORE)
+    _set_session(response, request, data)
+    return response
+
+
+@app.post("/api/auth/resend")
+async def auth_resend_confirmation(req: EmailBody, request: Request):
+    _require_auth(request)
+    await _auth_call(
+        request,
+        "POST",
+        "/resend",
+        params={"redirect_to": _link_target()},
+        body={"type": "signup", "email": _email(req.email)},
+    )
+    return JSONResponse({"status": "sent"}, headers=NO_STORE)
+
+
+@app.post("/api/auth/forgot-password")
+async def auth_forgot_password(req: EmailBody, request: Request):
+    _require_auth(request)
+    await _auth_call(
+        request,
+        "POST",
+        "/recover",
+        params={"redirect_to": _link_target()},
+        body={"email": _email(req.email)},
+    )
+    # Supabase answers the same whether or not the address has an account.
+    return JSONResponse({"status": "sent"}, headers=NO_STORE)
+
+
+@app.post("/api/auth/password")
+async def auth_change_password(req: PasswordBody, request: Request):
+    """Set a new password for whoever is signed in, including the session a reset link opened."""
+    _require_auth(request)
+    password = _password(req.password)
+    session = await _current_session(request)
+    if not session.user or not session.token:
+        signed_out = AuthError(
+            401, "Your session has ended. Open the reset link again, or log in.", reason="signed_out"
+        )
+        return _with_session(_error_json(signed_out), request, session)
+    try:
+        await _auth_call(request, "PUT", "/user", body={"password": password}, token=session.token)
+    except AuthError as exc:
+        return _with_session(_error_json(exc), request, session)
+    return _with_session(JSONResponse({"status": "updated"}, headers=NO_STORE), request, session)
+
+
+@app.post("/api/auth/logout")
+async def auth_logout(request: Request):
+    _require_same_origin(request)
+    access = request.cookies.get(ACCESS_COOKIE)
+    if AUTH_ENABLED and (access or request.cookies.get(REFRESH_COOKIE)):
+        try:
+            session = await _current_session(request)
+            if session.token:
+                _user_cache.pop(_token_key(session.token), None)
+                await _auth_call(request, "POST", "/logout", params={"scope": "local"}, token=session.token)
+        except AuthError as exc:
+            # The session is over already, or Supabase cannot be reached. The
+            # visitor asked to be signed out of this browser either way, and
+            # removing the cookies does exactly that.
+            log.info("Sign-out did not reach Supabase (status %s); clearing cookies.", exc.status_code)
+        finally:
+            if access:
+                _user_cache.pop(_token_key(access), None)
+    response = JSONResponse({"status": "signed_out"}, headers=NO_STORE)
+    _clear_session(response, request)
+    return response
+
+
+@app.post("/api/auth/session")
+async def auth_session_from_link(req: LinkSessionBody, request: Request):
+    """Turn the session an email link delivered into this site's cookies.
+
+    Supabase's default email templates send the visitor through its own /verify,
+    which redirects to AUTH_CALLBACK_PATH with the new session in the URL
+    fragment. A fragment never reaches a server, so the page there has to post
+    it here, and the access token is checked with Supabase before any cookie is
+    written.
+    """
+    _require_auth(request)
+    user = await _user_for(request, req.access_token)
+    if not user:
+        raise AuthError(
+            401, "This link has expired or has already been used. Request a new one.", reason="otp_expired"
+        )
+    lifetime = int(_token_expiry(req.access_token) - time.time())
+    response = JSONResponse({"user": _public_user(user)}, headers=NO_STORE)
+    _set_session(
+        response,
+        request,
+        {"access_token": req.access_token, "refresh_token": req.refresh_token, "expires_in": lifetime},
+    )
+    return response
+
+
+@app.get("/auth/confirm", include_in_schema=False)
+async def auth_confirm(
+    request: Request,
+    token_hash: str = "",
+    link_type: str = Query("", alias="type"),
+    next_path: str = Query("", alias="next"),
+):
+    """Email links in the token_hash form, verified by this server.
+
+    Used when a project's email templates point at {{ .SiteURL }}/auth/confirm
+    (see README), which keeps the link on this site's own domain. A link that
+    fails goes on to AUTH_CALLBACK_PATH with an error_code for that page to explain.
+    """
+    if not AUTH_ENABLED:
+        raise HTTPException(status_code=404, detail="Not found.")
+    failed = f"{AUTH_CALLBACK_PATH}?error_code="
+    if not token_hash or len(token_hash) > 512 or link_type not in EMAIL_LINK_TYPES:
+        return RedirectResponse(failed + "invalid_link", status_code=303)
+    try:
+        data = await _auth_call(request, "POST", "/verify", body={"type": link_type, "token_hash": token_hash})
+    except AuthError as exc:
+        if exc.status_code >= 500:
+            code = "service_error"
+        elif exc.status_code == 429:
+            code = "rate_limited"
+        else:
+            code = "otp_expired"
+        return RedirectResponse(failed + code, status_code=303)
+    if not _has_tokens(data):
+        return RedirectResponse(failed + "otp_expired", status_code=303)
+    if isinstance(data.get("user"), dict):
+        _remember_user(data["access_token"], data["user"])
+
+    if link_type == "recovery":
+        destination = AUTH_RESET_PATH
+    elif link_type in ("signup", "email", "invite"):
+        destination = f"{AUTH_ACCOUNT_PATH}?welcome=1"
+    else:
+        destination = AUTH_ACCOUNT_PATH
+    response = RedirectResponse(_safe_next(next_path) or destination, status_code=303, headers=NO_STORE)
+    _set_session(response, request, data)
+    return response
+
+
+# ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
 @app.get("/", include_in_schema=False)
@@ -1554,6 +2209,8 @@ async def health():
             if (WEBSHARE_PROXY_USERNAME and WEBSHARE_PROXY_PASSWORD)
             else ("generic" if GENERIC_PROXY_URL else None)
         ),
+        "auth_configured": AUTH_ENABLED,
+        "auth_forwards_client_ip": AUTH_FORWARDS_CLIENT_IP,
     }
 
 
@@ -1693,11 +2350,7 @@ async def static_file(filename: str):
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
     """Default handler plus an optional machine-readable `reason`."""
-    body: Dict[str, Any] = {"detail": exc.detail}
-    reason = getattr(exc, "reason", None)
-    if reason:
-        body["reason"] = reason
-    return JSONResponse(status_code=exc.status_code, content=body, headers=exc.headers)
+    return _error_json(exc)
 
 
 @app.exception_handler(Exception)
