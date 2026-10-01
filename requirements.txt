@@ -1,4 +1,6 @@
-fastapi>=0.115.0,<1.0.0
+# >=0.142 pulls a Starlette that imports python_multipart, so it no longer
+# raises the PendingDeprecationWarning for `import multipart`.
+fastapi>=0.142.0,<1.0.0
 uvicorn[standard]>=0.32.0,<1.0.0
 # >=1.0 is required: the instance API and youtube_transcript_api.proxies
 # (used for the residential-proxy fallback) do not exist before 1.0.
