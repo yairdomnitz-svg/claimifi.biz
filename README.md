@@ -82,6 +82,8 @@ No Dockerfile and no `railway.toml` are needed (Config-as-Code is deprecated).
 | `PROXY_URL` | See below | Alternative to Webshare: any `http://user:pass@host:port`. |
 | `SUPABASE_URL` | For accounts | The Supabase project URL, `https://<ref>.supabase.co`. The account API stays off until this and `SUPABASE_SECRET_KEY` are both set. See [Accounts](#accounts-supabase). |
 | `SUPABASE_SECRET_KEY` | For accounts | A **secret** key (`sb_secret_...`), used only by the server. It is the one key type Supabase accepts each visitor's IP from; with any other key, Supabase's per-IP auth limits are shared by every visitor to the site. |
+| `STRIPE_SECRET_KEY` | For payments | Stripe secret key: `sk_test_...` while testing, `sk_live_...` once live. Payments stay off until this, `STRIPE_WEBHOOK_SECRET` and both Supabase variables are set. See [Payments](#payments-stripe). |
+| `STRIPE_WEBHOOK_SECRET` | For payments | The `whsec_...` signing secret of the webhook endpoint that points at `/api/stripe/webhook`. Locally, the one `stripe listen` prints. |
 
 Do **not** set `PORT` yourself — Railway injects it and must match the domain's target port.
 
@@ -182,6 +184,39 @@ Every `POST` takes JSON, from the site's own origin. Errors carry a string `deta
 show as-is, and a `reason` code for the page to branch on (`email_not_confirmed`,
 `invalid_credentials`, `weak_password`, `same_password`, `otp_expired`, …).
 
+### Payments (Stripe)
+
+One paid plan, **Pro**, at $7.99 a month or $70.99 a year. It is built on the accounts
+above, so it needs Supabase too. Visitors pay on Stripe's own Checkout page and manage
+their plan in Stripe's Customer Portal, so no Stripe script runs on this site.
+
+- **Prices live in Stripe, not here.** The server finds them by **lookup key**:
+  `pro_monthly` and `pro_yearly`. To change a price, add a new price in Stripe, move the
+  lookup key to it, and archive the old one. No code change and no deploy.
+- **The plan is stored on the Supabase user**, in `app_metadata.billing`, which only this
+  server can write. Only the webhook writes it, and it always re-reads the subscription
+  from Stripe first, so a repeated or out-of-order event cannot leave the wrong plan.
+- **Access** holds while the subscription is `active`, `trialing` or `past_due` (Stripe
+  retrying a failed renewal). In code, `_plan_for(user)` returns `"pro"` or `"free"`.
+  What Pro unlocks is not decided yet, so nothing is gated on it.
+
+To connect Stripe:
+
+1. In the Stripe Dashboard (test mode first), create a product with two recurring
+   prices, $7.99 monthly and $70.99 yearly, with the lookup keys `pro_monthly` and
+   `pro_yearly`.
+2. Turn on the Customer Portal (**Settings → Billing → Customer portal**), with plan
+   switching between the two prices and cancellation.
+3. Add a webhook endpoint at `https://claimifi.biz/api/stripe/webhook` for
+   `checkout.session.completed` and `customer.subscription.created`, `.updated` and
+   `.deleted`.
+4. In Railway, set `STRIPE_SECRET_KEY` and `STRIPE_WEBHOOK_SECRET`, then deploy.
+   `GET /health` should report `billing_configured: true`.
+
+Locally, run `stripe listen --forward-to localhost:8000/api/stripe/webhook` and use the
+`whsec_...` it prints. Checkout comes back to `/account?checkout=success`, and a cancelled
+checkout to `/pricing?checkout=cancelled`. The frontend has to serve both pages.
+
 ## API
 
 | Endpoint | Purpose |
@@ -199,6 +234,10 @@ show as-is, and a `reason` code for the page to branch on (`email_not_confirmed`
 | `POST /api/auth/password` | `{"password"}`; sets a new password for whoever is signed in |
 | `POST /api/auth/resend` | `{"email"}`; sends the confirmation email again |
 | `POST /api/auth/session`, `GET /auth/confirm` | Turn an email link into a session |
+| `GET /api/billing/status` | Whether payments are on, the prices from Stripe, and the signed-in user's plan |
+| `POST /api/billing/checkout` | `{"interval": "monthly" \| "yearly"}`; answers `{"url"}` for Stripe Checkout |
+| `POST /api/billing/portal` | Answers `{"url"}` for the Stripe Customer Portal |
+| `POST /api/stripe/webhook` | Stripe's notifications, signature-checked |
 | `GET /robots.txt`, `/sitemap.xml` | SEO |
 
 `POST /api/analyze` failure codes: `400` malformed input, or a bare video ID sent as a

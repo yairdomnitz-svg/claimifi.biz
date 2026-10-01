@@ -20,6 +20,7 @@ import base64
 import concurrent.futures
 import contextlib
 import hashlib
+import hmac
 import ipaddress
 import json
 import logging
@@ -236,6 +237,15 @@ SUPABASE_SECRET_KEY = os.getenv("SUPABASE_SECRET_KEY", "").strip()
 AUTH_ENABLED = bool(SUPABASE_URL and SUPABASE_SECRET_KEY)
 AUTH_FORWARDS_CLIENT_IP = AUTH_ENABLED and SUPABASE_SECRET_KEY.startswith("sb_secret_")
 
+# Optional subscriptions through Stripe, on top of the accounts above: a plan is
+# bought by a signed-in user, so billing stays off without Supabase as well.
+# Test-mode keys (sk_test_...) and live keys work the same; nothing here cares
+# which. The webhook secret is the whsec_... of the endpoint (or `stripe listen`)
+# that delivers to /api/stripe/webhook.
+STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "").strip()
+STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "").strip()
+BILLING_ENABLED = AUTH_ENABLED and bool(STRIPE_SECRET_KEY and STRIPE_WEBHOOK_SECRET)
+
 TRUSTED_SOURCES = [
     "historians.org", "oah.org", "history.ac.uk", "iamhist.net",
     "jstor.org", "muse.jhu.edu", "archives.gov", "docsteach.org",
@@ -270,10 +280,14 @@ _transcript_slots: Optional[asyncio.Semaphore] = None
 _auth_client: Optional[httpx.AsyncClient] = None
 AUTH_TIMEOUT = 15.0
 
+# Stripe likewise, so a checkout never waits behind an analysis.
+_stripe_client: Optional[httpx.AsyncClient] = None
+STRIPE_TIMEOUT = 20.0
+
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    global _grok_client, _transcript_pool, _transcript_slots, _auth_client
+    global _grok_client, _transcript_pool, _transcript_slots, _auth_client, _stripe_client
 
     # Held locally as well as globally, so shutdown closes exactly what this
     # lifespan opened. Reading the globals back would tear down a *later*
@@ -293,6 +307,19 @@ async def lifespan(_app: FastAPI):
         if AUTH_ENABLED
         else None
     )
+    stripe_client = (
+        httpx.AsyncClient(
+            timeout=httpx.Timeout(STRIPE_TIMEOUT, connect=5.0),
+            limits=httpx.Limits(max_connections=10),
+        )
+        if BILLING_ENABLED
+        else None
+    )
+    if (STRIPE_SECRET_KEY or STRIPE_WEBHOOK_SECRET) and not BILLING_ENABLED:
+        log.warning(
+            "Billing is off: it needs STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET and "
+            "the Supabase variables all set."
+        )
     if AUTH_ENABLED and not AUTH_FORWARDS_CLIENT_IP:
         log.warning(
             "SUPABASE_SECRET_KEY is not a secret key (sb_secret_...), so Supabase "
@@ -303,9 +330,14 @@ async def lifespan(_app: FastAPI):
     _transcript_pool = pool
     _transcript_slots = asyncio.Semaphore(TRANSCRIPT_WORKERS)
     _auth_client = auth_client
+    _stripe_client = stripe_client
     try:
         yield
     finally:
+        if _stripe_client is stripe_client:
+            _stripe_client = None
+        if stripe_client is not None:
+            await stripe_client.aclose()
         if _grok_client is client:
             _grok_client = None
         if _transcript_pool is pool:
@@ -2086,6 +2118,366 @@ async def auth_confirm(
 
 
 # ---------------------------------------------------------------------------
+# Billing (Stripe subscriptions)
+# ---------------------------------------------------------------------------
+# One paid plan, billed monthly or yearly. The prices live in Stripe and are
+# found by lookup key, so a price change is made in the Stripe Dashboard and
+# never here. Visitors pay on Stripe's own Checkout page and manage their plan
+# in Stripe's Customer Portal, so no Stripe script runs on these pages and the
+# CSP stays same-origin.
+#
+# What a user has bought is kept on their Supabase user, in app_metadata, which
+# only this server can write. Only the webhook writes the subscription there,
+# and it always writes it as Stripe reports it at that moment, so an event that
+# arrives twice or out of order still settles on the right answer.
+PLAN_NAME = "pro"
+PRICE_LOOKUP_KEYS = {"monthly": "pro_monthly", "yearly": "pro_yearly"}
+# Statuses that keep the plan. past_due is Stripe retrying a failed renewal:
+# access holds while it does, and goes once Stripe gives up and the status moves on.
+PAID_STATUSES = frozenset({"active", "trialing", "past_due"})
+SUBSCRIPTION_EVENTS = frozenset(
+    {"customer.subscription.created", "customer.subscription.updated", "customer.subscription.deleted"}
+)
+PRICING_PATH = "/pricing"
+STRIPE_API = "https://api.stripe.com/v1"
+# How old a signed webhook may be. Stripe's own libraries allow the same.
+WEBHOOK_TOLERANCE = 300
+WEBHOOK_MAX_BYTES = 256 * 1024
+PRICE_CACHE_SECONDS = 600
+_price_cache: Dict[str, Any] = {}
+_STRIPE_ID_RE = re.compile(r"^[A-Za-z0-9_]{1,255}$")
+_USER_ID_RE = re.compile(r"^[0-9a-fA-F-]{36}$")
+
+
+class BillingError(AuthError):
+    """Shaped like an account refusal: a detail for the visitor and a reason code."""
+
+
+async def _stripe_call(
+    method: str,
+    path: str,
+    *,
+    data: Optional[Dict[str, str]] = None,
+    params: Optional[List[tuple]] = None,
+    idempotency_key: Optional[str] = None,
+) -> Dict[str, Any]:
+    client = _stripe_client
+    if not BILLING_ENABLED or client is None:
+        raise BillingError(503, "Payments aren't switched on yet.", reason="billing_unavailable")
+    headers = {"Authorization": f"Bearer {STRIPE_SECRET_KEY}"}
+    if idempotency_key:
+        headers["Idempotency-Key"] = idempotency_key
+    try:
+        resp = await client.request(method, f"{STRIPE_API}{path}", data=data, params=params, headers=headers)
+    except httpx.TimeoutException as exc:
+        raise BillingError(504, "The payment service took too long to answer. Please try again.") from exc
+    except httpx.HTTPError as exc:
+        log.warning("Stripe unreachable (%s)", type(exc).__name__)
+        raise BillingError(502, "Couldn't reach the payment service. Please try again.") from exc
+
+    try:
+        body = resp.json() if resp.content else {}
+    except ValueError:
+        body = {}
+    if resp.status_code >= 400:
+        error = body.get("error") if isinstance(body, dict) else None
+        error = error if isinstance(error, dict) else {}
+        log.error(
+            "Stripe refused %s %s: status=%s type=%s code=%s msg=%s",
+            method, path, resp.status_code, error.get("type"), error.get("code"), error.get("message"),
+        )
+        # Stripe's messages are written for developers and can name keys or IDs,
+        # so none of it reaches the visitor.
+        raise BillingError(502, "The payment service couldn't do that. Please try again.", reason="billing_error")
+    return body if isinstance(body, dict) else {}
+
+
+async def _prices() -> Dict[str, Dict[str, Any]]:
+    """The plan's active prices by interval, read from Stripe and kept ten minutes."""
+    cached = _price_cache.get("prices")
+    if cached is not None and _price_cache.get("until", 0.0) > time.monotonic():
+        return cached
+    params = [("active", "true")] + [("lookup_keys[]", key) for key in PRICE_LOOKUP_KEYS.values()]
+    body = await _stripe_call("GET", "/prices", params=params)
+    by_key = {p.get("lookup_key"): p for p in body.get("data") or [] if isinstance(p, dict)}
+    prices = {}
+    for interval, key in PRICE_LOOKUP_KEYS.items():
+        price = by_key.get(key)
+        if price and isinstance(price.get("id"), str):
+            prices[interval] = {"id": price["id"], "amount": price.get("unit_amount"), "currency": price.get("currency")}
+    # Only a complete answer is kept, so a price added in the Dashboard shows up
+    # on the next request rather than ten minutes later.
+    if len(prices) == len(PRICE_LOOKUP_KEYS):
+        _price_cache.update(prices=prices, until=time.monotonic() + PRICE_CACHE_SECONDS)
+    return prices
+
+
+def _billing(user: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    meta = (user or {}).get("app_metadata")
+    billing = meta.get("billing") if isinstance(meta, dict) else None
+    return billing if isinstance(billing, dict) else {}
+
+
+def _plan_for(user: Optional[Dict[str, Any]]) -> str:
+    """PLAN_NAME or "free". What the plan unlocks is up to whoever asks."""
+    return PLAN_NAME if _billing(user).get("status") in PAID_STATUSES else "free"
+
+
+def _public_billing(user: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    billing = _billing(user)
+    return {
+        "plan": _plan_for(user),
+        "interval": billing.get("interval"),
+        "status": billing.get("status"),
+        "current_period_end": billing.get("current_period_end"),
+        "cancel_at_period_end": bool(billing.get("cancel_at_period_end")),
+    }
+
+
+def _forget_user(user_id: str) -> None:
+    """Drop a user's cached record, so a change to their plan shows at once."""
+    for key in [k for k, (user, _) in _user_cache.items() if user.get("id") == user_id]:
+        _user_cache.pop(key, None)
+
+
+async def _save_billing(request: Request, user_id: str, billing: Dict[str, Any]) -> None:
+    # Supabase merges app_metadata by top-level key, so this replaces "billing"
+    # and leaves the rest (provider, providers) alone.
+    await _auth_call(request, "PUT", f"/admin/users/{user_id}", body={"app_metadata": {"billing": billing}})
+    _forget_user(user_id)
+
+
+async def _customer_for(request: Request, user: Dict[str, Any]) -> str:
+    """The user's Stripe customer, created the first time they reach checkout."""
+    existing = _billing(user).get("customer_id")
+    if isinstance(existing, str) and existing:
+        return existing
+    customer = await _stripe_call(
+        "POST",
+        "/customers",
+        data={"email": user.get("email") or "", "metadata[user_id]": user["id"]},
+        # Two checkout clicks at once still make one customer.
+        idempotency_key=f"claimifi-customer-{user['id']}",
+    )
+    customer_id = customer.get("id")
+    if not isinstance(customer_id, str):
+        raise BillingError(502, "The payment service sent an unexpected reply. Please try again.")
+    await _save_billing(request, user["id"], {**_billing(user), "customer_id": customer_id})
+    return customer_id
+
+
+def _subscription_state(sub: Dict[str, Any]) -> Dict[str, Any]:
+    """The part of a Stripe subscription worth keeping on the user."""
+    items = (sub.get("items") or {}).get("data") or []
+    item = items[0] if items and isinstance(items[0], dict) else {}
+    price = item.get("price") if isinstance(item.get("price"), dict) else {}
+    recurring = price.get("recurring") if isinstance(price.get("recurring"), dict) else {}
+    customer = sub.get("customer")
+    if isinstance(customer, dict):
+        customer = customer.get("id")
+    return {
+        "customer_id": customer,
+        "subscription_id": sub.get("id"),
+        "status": sub.get("status"),
+        "interval": {"month": "monthly", "year": "yearly"}.get(recurring.get("interval")),
+        # Newer API versions keep the period on the item, older ones on the subscription.
+        "current_period_end": item.get("current_period_end") or sub.get("current_period_end"),
+        "cancel_at_period_end": bool(sub.get("cancel_at_period_end") or sub.get("cancel_at")),
+    }
+
+
+def _user_id_for(sub: Dict[str, Any], hint: Any = None) -> Optional[str]:
+    customer = sub.get("customer") if isinstance(sub.get("customer"), dict) else {}
+    for source in (sub.get("metadata"), customer.get("metadata")):
+        if isinstance(source, dict) and isinstance(source.get("user_id"), str):
+            hint = source["user_id"]
+            break
+    return hint if isinstance(hint, str) and _USER_ID_RE.match(hint) else None
+
+
+async def _sync_subscription(request: Request, subscription_id: str, user_hint: Any = None) -> None:
+    """Write a subscription to its user exactly as Stripe reports it now."""
+    if not _STRIPE_ID_RE.match(subscription_id):
+        log.warning("Ignoring a malformed subscription id from Stripe.")
+        return
+    sub = await _stripe_call("GET", f"/subscriptions/{subscription_id}", params=[("expand[]", "customer")])
+    user_id = _user_id_for(sub, user_hint)
+    if not user_id:
+        log.warning("Subscription %s names no user; it was not made through this site.", subscription_id)
+        return
+    state = _subscription_state(sub)
+    current = _billing(await _auth_call(request, "GET", f"/admin/users/{user_id}"))
+    # A late event about an old, ended subscription must not take away a newer one.
+    if (
+        current.get("subscription_id") not in (None, state["subscription_id"])
+        and current.get("status") in PAID_STATUSES
+        and state["status"] not in PAID_STATUSES
+    ):
+        log.info("Subscription %s has ended, but its user holds another; left as is.", subscription_id)
+        return
+    await _save_billing(request, user_id, state)
+
+
+def _stripe_signature_ok(payload: bytes, header: str) -> bool:
+    """Check a Stripe-Signature header: t=<unix time>,v1=<hex HMAC>[,v1=...]."""
+    timestamp, signatures = "", []
+    for part in header.split(","):
+        key, _, value = part.strip().partition("=")
+        if key == "t":
+            timestamp = value
+        elif key == "v1":
+            signatures.append(value)
+    try:
+        age = abs(time.time() - int(timestamp))
+    except ValueError:
+        return False
+    if age > WEBHOOK_TOLERANCE or not signatures:
+        return False
+    expected = hmac.new(
+        STRIPE_WEBHOOK_SECRET.encode(), timestamp.encode() + b"." + payload, hashlib.sha256
+    ).hexdigest()
+    return any(hmac.compare_digest(expected, signature) for signature in signatures)
+
+
+def _require_billing(request: Request) -> None:
+    if not BILLING_ENABLED:
+        raise BillingError(503, "Payments aren't switched on yet.", reason="billing_unavailable")
+    _require_same_origin(request)
+
+
+class CheckoutBody(BaseModel):
+    interval: str = Field(max_length=16)
+
+
+@app.get("/api/billing/status")
+async def billing_status(request: Request):
+    """Whether payments are on, the prices, and the signed-in user's plan."""
+    if not BILLING_ENABLED:
+        return JSONResponse(
+            {"enabled": False, "signed_in": False, "prices": {}, **_public_billing(None)}, headers=NO_STORE
+        )
+    session = await _current_session(request)
+    try:
+        prices = await _prices()
+    except BillingError:
+        prices = {}
+    body = {
+        "enabled": True,
+        "signed_in": bool(session.user),
+        "prices": {k: {"amount": v["amount"], "currency": v["currency"]} for k, v in prices.items()},
+        **_public_billing(session.user),
+    }
+    return _with_session(JSONResponse(body, headers=NO_STORE), request, session)
+
+
+@app.post("/api/billing/checkout")
+async def billing_checkout(req: CheckoutBody, request: Request):
+    """Start a subscription: answers with the Stripe Checkout URL to send the visitor to."""
+    _require_billing(request)
+    if req.interval not in PRICE_LOOKUP_KEYS:
+        raise BillingError(400, "Choose monthly or yearly billing.", reason="invalid_interval")
+    session = await _current_session(request)
+    try:
+        user = session.user
+        if not user:
+            raise BillingError(401, "Log in to subscribe.", reason="signed_out")
+        if _plan_for(user) == PLAN_NAME:
+            raise BillingError(
+                409, "You're already subscribed. Manage your plan from your account.", reason="already_subscribed"
+            )
+        price = (await _prices()).get(req.interval)
+        if not price:
+            log.error("No active Stripe price has the lookup key %s.", PRICE_LOOKUP_KEYS[req.interval])
+            raise BillingError(503, "That plan isn't available right now.", reason="price_missing")
+        customer_id = await _customer_for(request, user)
+        checkout = await _stripe_call(
+            "POST",
+            "/checkout/sessions",
+            data={
+                "mode": "subscription",
+                "customer": customer_id,
+                "client_reference_id": user["id"],
+                "line_items[0][price]": price["id"],
+                "line_items[0][quantity]": "1",
+                "subscription_data[metadata][user_id]": user["id"],
+                "allow_promotion_codes": "true",
+                "success_url": f"{SITE_URL}{AUTH_ACCOUNT_PATH}?checkout=success",
+                "cancel_url": f"{SITE_URL}{PRICING_PATH}?checkout=cancelled",
+            },
+        )
+        url = checkout.get("url")
+        if not isinstance(url, str) or not url.startswith("https://"):
+            raise BillingError(502, "The payment service sent an unexpected reply. Please try again.")
+    except AuthError as exc:
+        return _with_session(_error_json(exc), request, session)
+    return _with_session(JSONResponse({"url": url}, headers=NO_STORE), request, session)
+
+
+@app.post("/api/billing/portal")
+async def billing_portal(request: Request):
+    """Answers with a Stripe Customer Portal URL: change plan, card, or cancel."""
+    _require_billing(request)
+    session = await _current_session(request)
+    try:
+        if not session.user:
+            raise BillingError(401, "Log in to manage your plan.", reason="signed_out")
+        customer_id = _billing(session.user).get("customer_id")
+        if not isinstance(customer_id, str) or not customer_id:
+            raise BillingError(409, "There's no subscription to manage yet.", reason="no_subscription")
+        portal = await _stripe_call(
+            "POST",
+            "/billing_portal/sessions",
+            data={"customer": customer_id, "return_url": f"{SITE_URL}{AUTH_ACCOUNT_PATH}"},
+        )
+        url = portal.get("url")
+        if not isinstance(url, str) or not url.startswith("https://"):
+            raise BillingError(502, "The payment service sent an unexpected reply. Please try again.")
+    except AuthError as exc:
+        return _with_session(_error_json(exc), request, session)
+    return _with_session(JSONResponse({"url": url}, headers=NO_STORE), request, session)
+
+
+@app.post("/api/stripe/webhook", include_in_schema=False)
+async def stripe_webhook(request: Request):
+    """Stripe's notifications. The only place a plan is ever granted or removed."""
+    if not BILLING_ENABLED:
+        raise HTTPException(status_code=404, detail="Not found.")
+    try:
+        declared = int(request.headers.get("content-length") or 0)
+    except ValueError:
+        declared = 0
+    if declared > WEBHOOK_MAX_BYTES:
+        raise HTTPException(status_code=413, detail="Too large.")
+    payload = await request.body()
+    if len(payload) > WEBHOOK_MAX_BYTES or not _stripe_signature_ok(
+        payload, request.headers.get("stripe-signature", "")
+    ):
+        raise HTTPException(status_code=400, detail="Invalid signature.")
+    try:
+        event = json.loads(payload)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid payload.")
+    kind = event.get("type") if isinstance(event, dict) else None
+    obj = ((event.get("data") or {}).get("object") or {}) if kind else {}
+
+    subscription_id, hint = None, None
+    if kind == "checkout.session.completed" and obj.get("mode") == "subscription":
+        subscription_id, hint = obj.get("subscription"), obj.get("client_reference_id")
+    elif kind in SUBSCRIPTION_EVENTS:
+        subscription_id = obj.get("id")
+    if isinstance(subscription_id, dict):
+        subscription_id = subscription_id.get("id")
+    if isinstance(subscription_id, str):
+        try:
+            await _sync_subscription(request, subscription_id, hint)
+        except AuthError as exc:
+            # Stripe retries anything but a 2xx, with backoff, for up to three days.
+            log.error("Webhook %s not processed (%s); Stripe will retry.", event.get("id"), exc.detail)
+            return JSONResponse(status_code=500, content={"detail": "Not processed."})
+    return {"received": True}
+
+
+# ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
 @app.get("/", include_in_schema=False)
@@ -2211,6 +2603,7 @@ async def health():
         ),
         "auth_configured": AUTH_ENABLED,
         "auth_forwards_client_ip": AUTH_FORWARDS_CLIENT_IP,
+        "billing_configured": BILLING_ENABLED,
     }
 
 
