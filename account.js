@@ -115,7 +115,13 @@
         var saving = Math.round((1 - y.amount / (12 * m.amount)) * 100);
         $('yearlySave').textContent = saving > 0 ? 'save ' + saving + '%' : '';
       }
-      if (status && status.plan === 'pro') {
+      if (status && status.plan === 'pro' && status.cancel_at_period_end) {
+        // Cancelled but still paid up: say when it ends, and offer the way back.
+        var ends = longDate(status.current_period_end);
+        subscribe.textContent = 'Keep Pro: it ends ' + (ends ? 'on ' + ends : 'soon');
+        say(msg, 'info', 'Your Pro plan is cancelled and ends ' + (ends ? 'on ' + ends : 'at the end of this period') +
+          '. You can keep it from your account page.');
+      } else if (status && status.plan === 'pro') {
         subscribe.textContent = 'You have Pro: manage your plan';
       } else {
         subscribe.textContent = 'Subscribe to Pro' + (p ? ' · ' + money(p.amount, p.currency) + (interval === 'yearly' ? '/yr' : '/mo') : '');
@@ -283,12 +289,28 @@
 
     var plan = null;
 
+    // Welcomes are remembered per account, not per browser: with one shared key,
+    // a second person subscribing on the same computer never saw theirs. The
+    // key carries a short hash of the email, never the address itself.
+    var accountTag = '';
+
+    function tagFor(email) {
+      var h = 5381;
+      var s = String(email || '').toLowerCase();
+      for (var i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) >>> 0;
+      return h.toString(36);
+    }
+
+    function welcomeKey(base) {
+      return accountTag ? base + '-' + accountTag : base;
+    }
+
     function welcomeSeen(key) {
-      try { return window.localStorage.getItem(key) === '1'; } catch (e) { return false; }
+      try { return window.localStorage.getItem(welcomeKey(key)) === '1'; } catch (e) { return false; }
     }
 
     function rememberWelcome(key) {
-      try { window.localStorage.setItem(key, '1'); } catch (e) { /* storage unavailable */ }
+      try { window.localStorage.setItem(welcomeKey(key), '1'); } catch (e) { /* storage unavailable */ }
     }
 
     function showWelcome(cardId, titleId, storageKey) {
@@ -349,7 +371,10 @@
       $('resumeBtn').hidden = !ending;
       $('cancelConfirm').hidden = true;
       // The portal needs a Stripe customer, which exists once checkout was reached.
+      // Once Pro has ended there is no plan to change there, only past invoices;
+      // Upgrade is the way back to Pro.
       $('portalBtn').hidden = !(isPro || b.status);
+      $('portalBtn').textContent = isPro ? 'Change plan, card or see invoices' : 'See past invoices';
     }
 
     function loadPlan(attempt) {
@@ -495,6 +520,7 @@
         if (next) { window.location.href = next; return; }
         $('accountCard').classList.add('wide');
         $('signedIn').hidden = false;
+        accountTag = tagFor(user.email);
         renderProfile(user);
         if (q.get('welcome') === '1') {
           showWelcome('newAccountWelcome', 'newAccountWelcomeTitle', 'claimifi-welcome-seen');

@@ -220,6 +220,9 @@
   /* ---------------- Plan and account in the header ---------------- */
 
   var BILLING_ON = document.documentElement.getAttribute('data-billing') === 'on';
+  // The visitor's plan as far as this page knows. It only shapes the waiting
+  // messages: what an analysis actually gets is decided by the server.
+  var currentPlan = 'free';
 
   // Only once payments exist: until then there is no plan to show, and the
   // request would be one more for every visitor on every page.
@@ -227,6 +230,7 @@
     fetch('/api/billing/status', { cache: 'no-store', credentials: 'same-origin' })
       .then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); })
       .then(function (b) {
+        currentPlan = b.plan === 'pro' ? 'pro' : 'free';
         var badge = $('navPlan');
         if (badge) badge.hidden = b.plan !== 'pro';
         var acct = $('navAccount');
@@ -297,6 +301,7 @@
           }).join('') +
         '</div>' +
         '<div class="elapsed" id="elapsed" aria-hidden="true">0s elapsed</div>' +
+        '<p class="loading-note" id="slowNote" hidden></p>' +
       '</div>');
   }
 
@@ -620,17 +625,35 @@
     running = true;
     btn.disabled = true;
     setBusy(true);
-    announce('Analyzing. This usually takes about a minute.');
+    // A Pro analysis checks up to four times the claims in far more depth, and
+    // takes minutes rather than one. Saying "about a minute" and then sitting
+    // on the last step read as stuck.
+    var pro = currentPlan === 'pro';
+    announce(pro
+      ? 'Analyzing in depth. Pro analyses usually take one to three minutes.'
+      : 'Analyzing. This usually takes about a minute.');
     renderLoading(!asVideo || !useTranscript);
     results.scrollIntoView({ block: 'start' });
 
     // Progress affordances on a rough schedule, not real server milestones.
-    var timers = [0, 6000, 14000, 26000].map(function (ms, i) {
+    // Pro's steps are spread across its longer run.
+    var schedule = pro ? [0, 10000, 35000, 70000] : [0, 6000, 14000, 26000];
+    var timers = schedule.map(function (ms, i) {
       return setTimeout(function () {
         if (i > 0) { var p = $('s' + (i - 1)); if (p) { p.classList.remove('on'); p.classList.add('ok'); } }
         var el = $('s' + i); if (el) el.classList.add('on');
       }, ms);
     });
+    // Past the last step, say it is still going rather than leave it frozen.
+    timers.push(setTimeout(function () {
+      var note = $('slowNote');
+      if (!note) return;
+      note.textContent = pro
+        ? 'Still working. Pro checks up to 20 claims in depth, which can take two to three minutes.'
+        : 'Still working, nearly there.';
+      note.hidden = false;
+      announce(note.textContent);
+    }, pro ? 100000 : 45000));
 
     var t0 = Date.now();
     var tick = setInterval(function () {

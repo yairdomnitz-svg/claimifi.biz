@@ -358,6 +358,7 @@ a.tag:hover { border-color: var(--accent-line); color: var(--accent); background
 .step.ok .box { border-color: var(--ok); background: var(--ok); box-shadow: none; }
 .step.ok { color: var(--text-2); }
 .elapsed { margin-top: 18px; font-size: .8rem; color: var(--text-3); font-variant-numeric: tabular-nums; }
+.loading-note { margin: 10px auto 0; max-width: 420px; font-size: .86rem; color: var(--text-2); }
 
 /* ---------------- Landing hero actions ---------------- */
 .hero-actions { display: flex; flex-wrap: wrap; gap: 12px; justify-content: center; margin-top: 38px; }
