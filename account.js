@@ -166,7 +166,6 @@
     var q = params();
     var next = safeNext(q.get('next'));
 
-    if (q.get('welcome') === '1') say(msg, 'ok', 'Your email is confirmed. Welcome to Claimifi.biz!');
     if (q.get('checkout') === 'success') say(msg, 'ok', 'Thank you! Your payment went through. Pro switches on within a few seconds.');
     if (q.get('deleted') === '1') say(msg, 'ok', 'Your account has been deleted, and any subscription cancelled. Thank you for using Claimifi.biz.');
     if (q.get('email_changed') === '1') say(msg, 'ok', 'Your email address has been changed.');
@@ -177,6 +176,11 @@
 
     var tabLogin = $('tabLogin'), tabSignup = $('tabSignup');
     var loginForm = $('loginForm'), signupForm = $('signupForm'), forgotForm = $('forgotForm');
+
+    if (q.get('deleted') === '1') {
+      $('signedOutIllustration').hidden = true;
+      $('deletedIllustration').hidden = false;
+    }
 
     function show(which) {
       loginForm.hidden = which !== 'login';
@@ -195,8 +199,8 @@
     });
     $('backToLogin').addEventListener('click', function () { show('login'); });
 
-    function afterSignIn() {
-      window.location.href = next || '/account';
+    function afterSignIn(isNewAccount) {
+      window.location.href = next || (isNewAccount ? '/account?welcome=1' : '/account');
     }
 
     loginForm.addEventListener('submit', function (e) {
@@ -208,7 +212,7 @@
       busy(button, true);
       request('POST', '/api/auth/login', { email: email, password: $('loginPassword').value }).then(function (r) {
         busy(button, false);
-        if (r.ok) { afterSignIn(); return; }
+        if (r.ok) { afterSignIn(false); return; }
         if (r.data.reason === 'email_not_confirmed') $('resendBtn').hidden = false;
         say(msg, 'err', errorText(r));
       });
@@ -234,7 +238,7 @@
       request('POST', '/api/auth/signup', { email: email, password: password }).then(function (r) {
         busy(button, false);
         if (!r.ok) { say(msg, 'err', errorText(r)); return; }
-        if (r.data.status === 'signed_in') { afterSignIn(); return; }
+        if (r.data.status === 'signed_in') { afterSignIn(true); return; }
         say(msg, 'ok', 'Almost there: we sent a confirmation link to ' + email + '. Open it to finish creating your account.');
         signupForm.reset();
       });
@@ -279,6 +283,44 @@
 
     var plan = null;
 
+    function welcomeSeen(key) {
+      try { return window.localStorage.getItem(key) === '1'; } catch (e) { return false; }
+    }
+
+    function rememberWelcome(key) {
+      try { window.localStorage.setItem(key, '1'); } catch (e) { /* storage unavailable */ }
+    }
+
+    function showWelcome(cardId, titleId, storageKey) {
+      if (welcomeSeen(storageKey)) return;
+      var card = $(cardId);
+      var title = $(titleId);
+      card.hidden = false;
+      window.setTimeout(function () {
+        try { title.focus({ preventScroll: true }); } catch (e) { title.focus(); }
+      }, 0);
+    }
+
+    function dismissWelcome(cardId, storageKey) {
+      $(cardId).hidden = true;
+      rememberWelcome(storageKey);
+      $('profileH').focus();
+    }
+
+    $('proWelcomeDismiss').addEventListener('click', function () {
+      dismissWelcome('proWelcome', 'claimifi-pro-welcome-seen');
+    });
+    $('newAccountWelcomeDismiss').addEventListener('click', function () {
+      dismissWelcome('newAccountWelcome', 'claimifi-welcome-seen');
+    });
+    $('showProFeatures').addEventListener('click', function (e) {
+      e.preventDefault();
+      var features = $('proWelcomeFeatures');
+      features.hidden = false;
+      this.setAttribute('aria-expanded', 'true');
+      try { features.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); } catch (err) { /* old browsers */ }
+    });
+
     function renderPlan(b) {
       plan = b;
       var isPro = b.plan === 'pro';
@@ -315,6 +357,11 @@
       request('GET', '/api/billing/status').then(function (r) {
         if (!r.ok) return;
         renderPlan(r.data);
+        if (q.get('checkout') === 'success' && r.data.plan === 'pro') {
+          msg.textContent = '';
+          $('newAccountWelcome').hidden = true;
+          showWelcome('proWelcome', 'proWelcomeTitle', 'claimifi-pro-welcome-seen');
+        }
         // Stripe tells the site about a payment by webhook, a moment after the
         // visitor is sent back here. Look again a few times before giving up.
         if (q.get('checkout') === 'success' && r.data.plan !== 'pro' && attempt < 6) {
@@ -449,9 +496,15 @@
         $('accountCard').classList.add('wide');
         $('signedIn').hidden = false;
         renderProfile(user);
+        if (q.get('welcome') === '1') {
+          showWelcome('newAccountWelcome', 'newAccountWelcomeTitle', 'claimifi-welcome-seen');
+        }
         loadPlan(0);
       } else {
         $('signedOut').hidden = false;
+        if (q.get('welcome') === '1') {
+          say(msg, 'ok', 'Your email is confirmed. Log in to open your account.');
+        }
         if (next && next.indexOf('/pricing') === 0 && !msg.textContent) {
           say(msg, 'info', 'Log in or create an account to subscribe to Pro.');
         }

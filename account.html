@@ -55,6 +55,25 @@
       <p class="msg" id="accountMsg" role="status"></p>
 
       <div id="signedOut" hidden>
+        <div class="auth-illustration" id="signedOutIllustration" aria-hidden="true">
+          <svg viewBox="0 0 180 116" aria-hidden="true">
+            <defs><linearGradient id="authGrad" x1="42" y1="18" x2="136" y2="101" gradientUnits="userSpaceOnUse"><stop stop-color="#A461F6"/><stop offset="1" stop-color="#7887F2"/></linearGradient></defs>
+            <path d="M44 35c0-8 6-14 14-14h63c8 0 15 6 15 14v52c0 8-7 14-15 14H58c-8 0-14-6-14-14V35Z" fill="#fff" stroke="var(--border-strong)" stroke-width="3"/>
+            <path d="m48 37 36 28c4 3 8 3 12 0l36-28" fill="none" stroke="var(--accent)" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+            <circle cx="137" cy="83" r="20" fill="url(#authGrad)"/>
+            <path d="m128 83 6 6 12-14" fill="none" stroke="#fff" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+            <circle cx="34" cy="63" r="4" fill="#B4D5F8"/><circle cx="146" cy="44" r="4" fill="#B4D5F8"/><circle cx="38" cy="81" r="3" fill="#B4D5F8"/><circle cx="142" cy="21" r="3" fill="#B4D5F8"/>
+          </svg>
+        </div>
+        <div class="auth-illustration auth-illustration-deleted" id="deletedIllustration" aria-hidden="true" hidden>
+          <svg viewBox="0 0 180 116" aria-hidden="true">
+            <defs><linearGradient id="deletedGrad" x1="53" y1="25" x2="127" y2="98" gradientUnits="userSpaceOnUse"><stop stop-color="#A461F6"/><stop offset="1" stop-color="#7887F2"/></linearGradient></defs>
+            <path d="M51 40h78l-7 57H58l-7-57Z" fill="#fff" stroke="var(--border-strong)" stroke-width="3" stroke-linejoin="round"/>
+            <path d="M45 40h90l-9-16H54l-9 16Z" fill="var(--accent-soft)" stroke="var(--border-strong)" stroke-width="3" stroke-linejoin="round"/>
+            <rect x="76" y="58" width="28" height="6" rx="3" fill="url(#deletedGrad)"/>
+            <circle cx="32" cy="91" r="5" fill="#B4D5F8"/><circle cx="148" cy="91" r="5" fill="#B4D5F8"/>
+          </svg>
+        </div>
         <div class="tabs" role="tablist" aria-label="Sign in or create an account">
           <button type="button" role="tab" id="tabLogin" aria-selected="true" aria-controls="loginForm">Log in</button>
           <button type="button" role="tab" id="tabSignup" aria-selected="false" aria-controls="signupForm">Create account</button>
@@ -87,8 +106,65 @@
       </div>
 
       <div id="signedIn" hidden>
+        <section class="welcome-card welcome-card-pro" id="proWelcome" aria-labelledby="proWelcomeTitle" hidden>
+          <button class="welcome-dismiss" id="proWelcomeDismiss" type="button" aria-label="Dismiss welcome message">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>
+          </button>
+          <div class="welcome-art welcome-art-pro" aria-hidden="true">
+            <svg viewBox="0 0 220 160" aria-hidden="true">
+              <defs><linearGradient id="proWelcomeGrad" x1="46" y1="28" x2="172" y2="135" gradientUnits="userSpaceOnUse"><stop stop-color="#A461F6"/><stop offset="1" stop-color="#7887F2"/></linearGradient></defs>
+              <path d="M61 29h83c8 0 14 6 14 14v86c0 8-6 14-14 14H61c-8 0-14-6-14-14V43c0-8 6-14 14-14Z" fill="#fff" stroke="var(--border-strong)" stroke-width="3"/>
+              <rect x="70" y="53" width="58" height="8" rx="4" fill="url(#proWelcomeGrad)"/><rect x="70" y="72" width="39" height="8" rx="4" fill="url(#proWelcomeGrad)"/><rect x="70" y="91" width="51" height="8" rx="4" fill="url(#proWelcomeGrad)"/>
+              <circle cx="151" cy="105" r="32" fill="url(#proWelcomeGrad)"/>
+              <path d="m136 106 10 10 20-24" fill="none" stroke="#fff" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+              <circle cx="182" cy="47" r="6" fill="#B4D5F8"/><circle cx="36" cy="83" r="6" fill="#B4D5F8"/>
+            </svg>
+            <span class="celebration-piece piece-1"></span><span class="celebration-piece piece-2"></span>
+            <span class="celebration-piece piece-3"></span><span class="celebration-piece piece-4"></span>
+            <span class="celebration-piece piece-5"></span><span class="celebration-piece piece-6"></span>
+            <span class="celebration-piece piece-7"></span><span class="celebration-piece piece-8"></span>
+          </div>
+          <div class="welcome-copy">
+            <h2 id="proWelcomeTitle" tabindex="-1">Welcome to Claimifi Pro</h2>
+            <p>We're glad to have you here. Every video you check now gets the full picture: up to 20 claims, confidence scores, what the video says next to what scholarship says, and where to dig deeper.</p>
+            <div class="welcome-actions">
+              <a class="btn" href="/app">Analyse a video</a>
+              <a class="welcome-link" id="showProFeatures" href="#proWelcomeFeatures" aria-expanded="false">See what's new in Pro</a>
+            </div>
+            <div class="welcome-features" id="proWelcomeFeatures" hidden>
+              <p>Now included with every analysis</p>
+              <ul>
+                <li>Up to 20 claims with confidence scores</li>
+                <li>Video claims compared directly with scholarship</li>
+                <li>Competing interpretations and trusted sources</li>
+              </ul>
+            </div>
+          </div>
+        </section>
+
+        <section class="welcome-card welcome-card-new" id="newAccountWelcome" aria-labelledby="newAccountWelcomeTitle" hidden>
+          <button class="welcome-dismiss" id="newAccountWelcomeDismiss" type="button" aria-label="Dismiss welcome message">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>
+          </button>
+          <div class="welcome-art" aria-hidden="true">
+            <svg viewBox="0 0 180 132" aria-hidden="true">
+              <defs><linearGradient id="newWelcomeGrad" x1="42" y1="25" x2="140" y2="109" gradientUnits="userSpaceOnUse"><stop stop-color="#A461F6"/><stop offset="1" stop-color="#7887F2"/></linearGradient></defs>
+              <path d="M42 37c0-8 7-15 15-15h67c8 0 15 7 15 15v63c0 8-7 15-15 15H57c-8 0-15-7-15-15V37Z" fill="#fff" stroke="var(--border-strong)" stroke-width="3"/>
+              <path d="m47 40 37 30c4 3 9 3 13 0l37-30" fill="none" stroke="var(--accent)" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+              <circle cx="130" cy="99" r="20" fill="url(#newWelcomeGrad)"/>
+              <path d="m121 99 6 6 12-14" fill="none" stroke="#fff" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+              <circle cx="32" cy="67" r="4" fill="#B4D5F8"/><circle cx="149" cy="53" r="4" fill="#B4D5F8"/><circle cx="35" cy="88" r="3" fill="#B4D5F8"/>
+            </svg>
+          </div>
+          <div class="welcome-copy">
+            <h2 id="newAccountWelcomeTitle" tabindex="-1">Welcome to Claimifi.biz</h2>
+            <p>Your account is ready. Paste a YouTube history video to check its claims.</p>
+            <div class="welcome-actions"><a class="btn" href="/app">Open the analyzer</a></div>
+          </div>
+        </section>
+
         <section class="acct-section" aria-labelledby="profileH">
-          <h2 id="profileH">Profile</h2>
+          <h2 id="profileH" tabindex="-1">Profile</h2>
           <dl class="kv">
             <dt>Name</dt><dd id="acctName">—</dd>
             <dt>Email</dt><dd id="acctEmail"></dd>

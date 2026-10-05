@@ -680,6 +680,61 @@ html:not([data-accounts="off"]) .accounts-off-only { display: none !important; }
 .btn-row .btn-ghost { flex: 1 1 160px; padding: 12px 18px; font-size: .92rem; }
 .danger-zone h2 { color: var(--bad); }
 
+/* ---------------- Account welcomes and page illustrations ---------------- */
+.page-illustration, .auth-illustration {
+  width: min(190px, 72vw); margin: 0 auto 16px;
+}
+.page-illustration-large { width: min(220px, 76vw); margin-bottom: 20px; }
+.page-illustration svg, .auth-illustration svg, .welcome-art svg { display: block; width: 100%; height: auto; }
+.auth-illustration { width: min(180px, 70vw); margin-bottom: 22px; }
+.auth-illustration-deleted { opacity: .9; }
+
+.welcome-card {
+  position: relative; display: grid; grid-template-columns: minmax(128px, 180px) minmax(0, 1fr);
+  gap: 22px; align-items: center; padding: 24px; margin-bottom: 30px;
+  background: var(--grad-soft); border: 1px solid var(--accent-line);
+  border-radius: var(--r-xl); box-shadow: var(--shadow-sm); overflow: hidden;
+}
+.welcome-card-new { grid-template-columns: minmax(108px, 148px) minmax(0, 1fr); }
+.welcome-copy { min-width: 0; }
+.welcome-copy h2 { color: var(--text); font-size: 1.36rem; line-height: 1.2; margin: 0 34px 8px 0; }
+.welcome-copy > p { color: var(--text-2); font-size: .94rem; line-height: 1.55; }
+.welcome-art { position: relative; width: 100%; max-width: 180px; margin: 0 auto; }
+.welcome-card-new .welcome-art { max-width: 148px; }
+.welcome-dismiss {
+  position: absolute; z-index: 3; top: 10px; right: 10px; width: 36px; height: 36px;
+  display: grid; place-items: center; color: var(--text-2); background: rgba(255, 255, 255, .76);
+  border: 1px solid var(--border-strong); border-radius: 50%; cursor: pointer;
+}
+.welcome-dismiss:hover { color: var(--accent); border-color: var(--accent-line); background: var(--bg-card); }
+.welcome-dismiss svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; }
+.welcome-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 12px 18px; margin-top: 18px; }
+.welcome-actions .btn { padding: 12px 20px; min-height: 44px; text-decoration: none; }
+.welcome-link { min-height: 44px; display: inline-flex; align-items: center; color: var(--accent); font-size: .9rem; font-weight: 700; }
+.welcome-features { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--accent-line); }
+.welcome-features > p { color: var(--text); font-size: .82rem; font-weight: 700; margin-bottom: 7px; }
+.welcome-features ul { display: grid; gap: 5px; padding-left: 18px; }
+.welcome-features li { color: var(--text-2); font-size: .86rem; }
+
+.celebration-piece {
+  position: absolute; left: 50%; top: 50%; width: 8px; height: 8px; opacity: 0;
+  border-radius: 2px; background: var(--brand-violet); pointer-events: none;
+  animation: welcome-burst 560ms ease-out both;
+}
+.piece-1 { --burst-x: -78px; --burst-y: -55px; animation-delay: 80ms; }
+.piece-2 { --burst-x: -95px; --burst-y: 8px; animation-delay: 210ms; background: var(--brand-blue); border-radius: 50%; }
+.piece-3 { --burst-x: -56px; --burst-y: 62px; animation-delay: 340ms; background: var(--brand-ice); }
+.piece-4 { --burst-x: 75px; --burst-y: -58px; animation-delay: 120ms; background: var(--brand-ice); border-radius: 50%; }
+.piece-5 { --burst-x: 96px; --burst-y: -4px; animation-delay: 260ms; background: var(--brand-violet); }
+.piece-6 { --burst-x: 62px; --burst-y: 65px; animation-delay: 390ms; background: var(--brand-blue); }
+.piece-7 { --burst-x: -18px; --burst-y: -78px; animation-delay: 500ms; background: var(--brand-blue); border-radius: 50%; }
+.piece-8 { --burst-x: 18px; --burst-y: 78px; animation-delay: 590ms; background: var(--brand-violet); }
+@keyframes welcome-burst {
+  0% { opacity: 0; transform: translate(-50%, -50%) scale(.4) rotate(0); }
+  22% { opacity: 1; }
+  100% { opacity: 0; transform: translate(calc(-50% + var(--burst-x)), calc(-50% + var(--burst-y))) scale(1) rotate(130deg); }
+}
+
 /* ---------------- Text pages (privacy, 404) ---------------- */
 .prose { max-width: 720px; margin: 0 auto; padding: 8px 0 24px; }
 .prose h2 { font-size: 1.15rem; font-weight: 700; margin: 30px 0 8px; }
@@ -718,9 +773,17 @@ html:not([data-accounts="off"]) .accounts-off-only { display: none !important; }
   .nav-right .btn-sm { display: none; }
   .nav-account { display: none; }
   .auth-card, .plan { padding: 24px 20px; }
+  .welcome-card, .welcome-card-new { grid-template-columns: 1fr; gap: 8px; padding: 20px; text-align: center; }
+  .welcome-art { width: min(154px, 54vw); }
+  .welcome-card-new .welcome-art { width: min(132px, 48vw); }
+  .welcome-copy h2 { margin-right: 24px; margin-left: 24px; }
+  .welcome-actions { justify-content: center; }
+  .welcome-actions .btn { width: 100%; }
+  .welcome-features { text-align: left; }
 }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
   html { scroll-behavior: auto; }
+  .celebration-piece { display: none; }
 }
