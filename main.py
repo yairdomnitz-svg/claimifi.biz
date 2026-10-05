@@ -3538,8 +3538,17 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException):
     A person who follows a dead link gets a page with a way back, not the raw
     JSON an API caller expects.
     """
-    if exc.status_code == 404 and _wants_html(request):
-        return HTMLResponse(_render_page("404.html"), status_code=404, headers={"Cache-Control": "no-store"})
+    if exc.status_code == 404:
+        # The header covers clients that never see the HTML page's meta tag:
+        # anything that does not ask for text/html gets the JSON reply.
+        noindex = {"X-Robots-Tag": "noindex"}
+        if _wants_html(request):
+            return HTMLResponse(
+                _render_page("404.html"), status_code=404, headers={"Cache-Control": "no-store", **noindex}
+            )
+        response = _error_json(exc)
+        response.headers.update(noindex)
+        return response
     return _error_json(exc)
 
 

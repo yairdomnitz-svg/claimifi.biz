@@ -266,6 +266,9 @@ def test_browsers_get_an_html_404_and_api_callers_json(client):
     api = c.get("/api/nope", headers={"Accept": "text/html"})
     assert api.headers["content-type"].startswith("application/json")
     assert c.get("/nope").json() == {"detail": "Not found."}
+    # Every 404 says noindex, whichever body the client was given.
+    assert page.headers["x-robots-tag"] == "noindex"
+    assert c.get("/nope").headers["x-robots-tag"] == "noindex"
 
 
 @pytest.mark.parametrize("path", ["/", "/app", "/pricing", "/privacy", "/styles.css", "/health", "/robots.txt"])
