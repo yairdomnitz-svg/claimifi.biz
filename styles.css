@@ -669,6 +669,8 @@ html:not([data-accounts="off"]) .accounts-off-only { display: none !important; }
 
 /* ---------------- Account: signed in ---------------- */
 .auth-card.wide { max-width: 560px; }
+/* The site-wide `section` padding is for landing-page blocks, not card parts. */
+.acct-section { padding: 0; }
 .acct-section h2 { font-size: 1.05rem; font-weight: 700; margin-bottom: 4px; }
 .btn-ghost.danger { color: var(--bad); border-color: rgba(191, 18, 56, .3); }
 .btn-ghost.danger:hover { color: var(--bad); background: var(--bad-soft); border-color: var(--bad); }
