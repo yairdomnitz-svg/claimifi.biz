@@ -65,7 +65,8 @@ def test_bare_video_id_is_routed_as_a_url():
     assert "function looksLikeVideo" in APP_JS
     assert "(?=[a-zA-Z0-9_-]{11}$)" in APP_JS
     body = APP_JS[APP_JS.index("function run()") :]
-    assert "looksLikeVideo(q) ? { url: q } : { title: q }" in body
+    assert "var asVideo = looksLikeVideo(q);" in body
+    assert "asVideo ? { url: q, transcript: useTranscript } : { title: q }" in body
 
 
 def test_title_only_results_are_visibly_marked():
