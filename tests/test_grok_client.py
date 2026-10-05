@@ -109,7 +109,9 @@ def test_truncation_at_max_tokens_is_reported_as_such(grok):
     with pytest.raises(HTTPException) as exc:
         _call(main, loop)
     assert exc.value.status_code == 502
-    assert "GROK_MAX_TOKENS" in exc.value.detail
+    assert "cut off" in exc.value.detail
+    # The cap is the operator's to raise; visitors are not told env var names.
+    assert "GROK_MAX_TOKENS" not in exc.value.detail
 
 
 def test_a_rejected_key_is_502_not_503(grok):

@@ -269,7 +269,9 @@ def test_proxy_hint_is_omitted_when_a_proxy_is_configured(client, monkeypatch):
     module2, c2 = client(XAI_API_KEY="k", ANALYSIS_ENABLED=1, RATE_LIMIT_REQUESTS=0)
     monkeypatch.setattr(module2, "_fetch_transcript_sync", raise_it)
     detail2 = c2.post("/api/analyze", json={"url": URL}).json()["detail"]
-    assert "WEBSHARE_PROXY_USERNAME" in detail2
+    # Without a proxy the hint is the operator's, so it is logged, not shown.
+    assert "WEBSHARE_PROXY_USERNAME" not in detail2
+    assert "title" in detail2.lower()
 
 
 def test_empty_caption_track_is_422(live, monkeypatch):
@@ -567,3 +569,68 @@ def test_a_deploy_without_a_key_fetches_no_transcript(client, monkeypatch):
     assert r.status_code == 503
     assert r.json()["reason"] == "no_api_key"
     assert fetches == []
+
+
+# --------------------------------------------------------------------------
+# Transcript toggle
+# --------------------------------------------------------------------------
+def test_transcript_off_checks_a_link_on_its_title(live, monkeypatch):
+    """With the toggle off the caption endpoint YouTube blocks on cloud hosts
+    is never called; the link's title is looked up and checked instead."""
+    module, c = live
+    fetched = []
+    monkeypatch.setattr(module, "_fetch_transcript_sync", lambda vid: fetched.append(vid) or "")
+    monkeypatch.setattr(module, "fetch_video_title", AsyncMock(return_value="The Fall of Rome"))
+    r = c.post("/api/analyze", json={"url": URL, "transcript": False})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["basis"] == "title"
+    assert body["video_title"] == "The Fall of Rome"
+    assert body["video_id"] == "dQw4w9WgXcQ"
+    assert body["transcript_preview"] is None
+    assert fetched == []
+    assert module.call_grok.await_args.kwargs["basis"] == "title"
+
+
+def test_transcript_defaults_on(live, monkeypatch):
+    module, c = live
+    monkeypatch.setattr(module, "fetch_video_title", AsyncMock(side_effect=AssertionError))
+    body = c.post("/api/analyze", json={"url": URL}).json()
+    assert body["basis"] == "transcript"
+
+
+@pytest.mark.parametrize(
+    "status, payload, expected",
+    [
+        (200, {"title": "Who built the pyramids"}, 200),
+        (404, None, 404),
+        (401, None, 422),
+        (500, None, 502),
+        (200, {"title": ""}, 502),
+    ],
+)
+def test_title_lookup_maps_oembed_answers(client, status, payload, expected):
+    import asyncio
+
+    import httpx
+
+    module, _ = client()
+
+    def handler(request):
+        assert request.url.host == "www.youtube.com"
+        assert request.url.path == "/oembed"
+        return httpx.Response(status, json=payload) if payload is not None else httpx.Response(status)
+
+    async def go():
+        module._grok_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        try:
+            return await module.fetch_video_title("dQw4w9WgXcQ")
+        finally:
+            await module._grok_client.aclose()
+
+    if expected == 200:
+        assert asyncio.run(go()) == "Who built the pyramids"
+    else:
+        with pytest.raises(module.HTTPException) as exc:
+            asyncio.run(go())
+        assert exc.value.status_code == expected

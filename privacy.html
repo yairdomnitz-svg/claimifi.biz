@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en" data-accounts="__ACCOUNTS__" data-billing="__BILLING__">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#ffffff">
+
+<title>Privacy | Claimifi.biz</title>
+<meta name="description" content="What Claimifi.biz does with the videos you check, your account and your payments.">
+<meta name="robots" content="index, follow">
+<link rel="canonical" href="__SITE_URL__/privacy">
+<link rel="icon" href="/favicon.svg?v=__ASSET_V__" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Lato:ital,wght@0,400;0,700;1,700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/styles.css?v=__ASSET_V__">
+</head>
+<body data-page="privacy">
+
+<a href="#main" class="skip">Skip to content</a>
+
+<header>
+  <div class="wrap nav">
+    <a href="/" class="brand" aria-label="Claimifi.biz home">
+      <img class="brand-mark" src="/favicon.svg?v=__ASSET_V__" alt="" width="34" height="34">
+      <span class="brand-name">Claimifi<span>.biz</span></span>
+    </a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="/app">Analyzer</a>
+      <a href="/#how">How it works</a>
+      <a href="/pricing" class="needs-billing">Pricing</a>
+    </nav>
+    <div class="nav-right">
+      <span class="status" id="status" role="status"><span class="dot" aria-hidden="true"></span><span id="statusText">Checking…</span></span>
+      <span class="plan-badge" id="navPlan" hidden>Pro</span>
+      <a class="nav-account needs-accounts" id="navAccount" href="/account">Sign in</a>
+    </div>
+  </div>
+</header>
+
+<main id="main" tabindex="-1">
+  <div class="wrap">
+    <div class="page-head">
+      <h1>Privacy</h1>
+      <p class="updated">Last updated 5 October 2026</p>
+    </div>
+    <div class="prose">
+      <p>Claimifi.biz checks the historical claims in YouTube videos. This page explains what that involves for your data. In short: we keep as little as we can, we don't run analytics or advertising trackers, and we don't sell anything about you.</p>
+
+      <h2>Videos and titles you check</h2>
+      <p>When you analyse a video, the link or title you enter is sent to our server. For a link, the server fetches that video's public captions from YouTube, through a proxy service when one is configured. The captions or title are then sent to xAI's Grok model, which writes the analysis. We don't save your links, titles or results: the page shows the analysis and nothing keeps it. When an analysis fails, our server log may record the video's ID so we can find out why.</p>
+      <p>xAI processes that text under its own terms and privacy policy. Don't paste anything private into the analyzer: it is built for public videos.</p>
+
+      <h2>Your IP address</h2>
+      <p>To stop the service being overloaded, the server counts recent analyses per IP address (per account for Pro subscribers). These counts are held in memory for at most a few hours and are never written to disk. Our host, Railway, may keep standard request logs.</p>
+
+      <h2>Accounts</h2>
+      <p>If you create an account, your email address and password are handled by Supabase, our account provider. Passwords are stored by Supabase in hashed form; we never see them. We use your email only to run your account: confirmation, password resets and messages about your subscription.</p>
+      <p>Signing in sets two cookies that keep you logged in. They are strictly necessary, can't be read by scripts on the page, and are removed when you sign out. Visitors without an account get no cookies at all.</p>
+
+      <h2>Payments</h2>
+      <p>Pro subscriptions are paid through Stripe, on Stripe's own checkout page. Your card details go to Stripe and never reach our server. We keep a record of your plan, its billing period and your Stripe customer reference with your account, so we know which features to give you.</p>
+
+      <h2>Fonts</h2>
+      <p>The site loads its typeface from Google Fonts, so your browser contacts Google's servers when a page opens.</p>
+
+      <h2>Your choices</h2>
+      <ul>
+        <li>You can use the analyzer without an account.</li>
+        <li>You can cancel a subscription at any time from your account page.</li>
+        <li>You can ask us to show you, or delete, the data we hold about your account.</li>
+      </ul>
+      <!--contact-privacy-->
+    </div>
+
+  </div>
+</main>
+
+<footer>
+  <div class="wrap">
+    <div class="foot-base" style="border:0;padding-top:0">
+      <p>Claimifi.biz is an educational tool. Always cross-check important historical claims against primary sources and peer-reviewed scholarship. &nbsp;·&nbsp; <a href="/">Home</a> &nbsp;·&nbsp; <a href="/app">Analyzer</a> <span class="needs-billing">&nbsp;·&nbsp; <a href="/pricing">Pricing</a></span> &nbsp;·&nbsp; <a href="/privacy">Privacy</a><!--contact-inline--></p>
+    </div>
+  </div>
+</footer>
+
+<script src="/app.js?v=__ASSET_V__" defer></script>
+</body>
+</html>

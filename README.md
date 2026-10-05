@@ -8,11 +8,18 @@ constrained to a fixed list of academic, archival, and fact-checking domains.
 ## Files (all at repository root)
 
 ```
-main.py                FastAPI backend; serves both pages and the API
+main.py                FastAPI backend; serves the pages and the API
 index.html             Landing page (/)
 app.html               Analyzer (/app)
+pricing.html           Free vs Pro, with the Subscribe button (/pricing)
+account.html           Sign up, log in, plan and billing (/account)
+callback.html          Where email links land (/auth/callback)
+reset-password.html    New password after a reset link (/reset-password)
+privacy.html           Privacy notice (/privacy)
+404.html               Page-not-found page, for browsers
 styles.css             Shared stylesheet
-app.js                 Shared analyzer logic
+app.js                 Analyzer logic, plus the header status badge on every page
+account.js             Pricing, account, email-link and reset pages
 favicon.svg            Logo mark: tab icon and header brand
 apple-touch-icon.png   iOS home-screen icon
 og-image.png           1200x630 social preview
@@ -23,10 +30,16 @@ Procfile               Start command fallback
 .env.example           Template for local .env
 ```
 
-There is no build step: the CSS and JS are served as-is. Both pages reference
+There is no build step: the CSS and JS are served as-is. The pages reference
 them as `/styles.css?v=<hash>`, where the hash is derived from the contents of
 the CSS, the JS and the logo at startup, so a deploy invalidates a visitor's
 cached copy automatically.
+
+The server fills a few markers in every page as it serves it: `__SITE_URL__`
+(canonical, Open Graph and JSON-LD URLs follow `SITE_URL`), `data-accounts` and
+`data-billing` on `<html>` (links to the account and pricing pages stay hidden until
+Supabase and Stripe are configured), and the `<!--contact-...-->` comments, which become
+the Contact links from `CONTACT_EMAIL`.
 
 ## Colour and type
 
@@ -56,7 +69,8 @@ No Dockerfile and no `railway.toml` are needed (Config-as-Code is deprecated).
 | Variable | Required | Notes |
 | --- | --- | --- |
 | `ANALYSIS_ENABLED` | No | Master switch for everything that costs money. Defaults to `true`. Set it to `false` to pause: `/api/analyze` then returns `503` with `"reason": "analysis_disabled"` and the page says analysis is paused. |
-| `DAILY_BUDGET_USD` | No | Hard ceiling on estimated spend per UTC day. Default `2.0`; `0` disables. Costed from xAI's own `usage` block against `MODEL_PRICING`, so a title check and a 25k-token transcript are not priced alike. In-process, so it resets on redeploy — the request ceilings stay underneath it. |
+| `DAILY_BUDGET_USD` | No | Hard ceiling on estimated spend per UTC day for free analyses. Default `2.0`; `0` disables. Costed from xAI's own `usage` block against `MODEL_PRICING`, so a title check and a 25k-token transcript are not priced alike. Each call holds its worst-case cost while it runs, so concurrent calls cannot all pass the same check; the overshoot is at most one call. In-process, so it resets on redeploy — the request ceilings stay underneath it. |
+| `PRO_DAILY_BUDGET_USD` | No | The same ceiling for Pro analyses, as a separate pool so a busy free tier never turns a subscriber away. Default `10.0`; `0` disables. |
 | `XAI_API_KEY` | **Yes** | From https://console.x.ai. Without it `/api/analyze` returns `503` with `"reason": "no_api_key"` and the page says so. There is no demo mode: a fact-checker must never show invented verdicts. |
 | `GROK_MODEL` | No | Defaults to `grok-4.3`. `grok-4` is no longer on xAI's published model list and the dated `grok-4-0709` snapshot was retired on 2026-05-15, so pin a documented id. |
 | `ALLOWED_ORIGINS` | No | Comma-separated. Defaults to `SITE_URL` and its `www.` form — **not** `*`, because `/api/analyze` is unauthenticated and costs money per call. `*` alone is accepted; `*` mixed with explicit origins is refused at startup. |
@@ -69,12 +83,16 @@ No Dockerfile and no `railway.toml` are needed (Config-as-Code is deprecated).
 | `MAX_RATE_BUCKETS` | No | Hard cap on rate-limit buckets held in memory. Default `20000`. |
 | `TRUSTED_PROXY_HOPS` | No | How many proxies append to `X-Forwarded-For` before the request arrives. Default `1` (Railway alone). Set to `2` if you put a CDN such as Cloudflare in front — otherwise Railway's rightmost hop is the *CDN's* address, every visitor shares one rate-limit bucket, and the per-IP limit locks out the whole audience at once. |
 | `GROK_TIMEOUT` | No | Seconds to wait on xAI. Default `120`. |
-| `GROK_MAX_TOKENS` | No | Output budget per analysis. Default `8000`. A reply cut off here returns 502 rather than being reported as malformed. |
+| `GROK_MAX_TOKENS` | No | Output budget per free analysis. Default `8000`. A reply cut off here returns 502 rather than being reported as malformed. |
+| `GROK_MAX_TOKENS_PRO` | No | Output budget per Pro analysis, which checks up to 20 claims in depth. Default `20000`. |
+| `GROK_TIMEOUT_PRO` | No | Seconds to wait on xAI for a Pro analysis. Default `200`. The page waits 270 s in all, so keep this plus `TRANSCRIPT_TIMEOUT` below that. |
 | `GROK_TEMPERATURE` | No | Default `0.2`. |
 | `MAX_TRANSCRIPT_CHARS` | No | Transcript characters sent to Grok. Default `100000`. |
 | `XAI_BASE_URL` | No | Default `https://api.x.ai/v1`. |
 | `LOG_LEVEL` | No | `DEBUG`/`INFO`/`WARNING`/`ERROR`/`CRITICAL`. Default `INFO`. An unrecognised value logs a warning and falls back instead of failing to boot. |
 | `RATE_LIMIT_REQUESTS` | No | Analyses per IP per window. Default `10`. `0` disables. |
+| `PRO_RATE_LIMIT_REQUESTS` | No | Analyses per Pro account per `RATE_LIMIT_WINDOW`. Default `30`; `0` disables. Pro is metered per account, not per IP, and is outside the global limit. |
+| `CONTACT_EMAIL` | No | Shown as the Contact link in the footers and on the privacy page. Defaults to `yair.claimifi@gmail.com`; set it empty to show no contact link. |
 | `RATE_LIMIT_WINDOW` | No | Window in seconds. Default `600`. |
 | `WEBSHARE_PROXY_USERNAME` / `WEBSHARE_PROXY_PASSWORD` | See below | Residential proxy for transcript fetching. |
 | `WEBSHARE_RETRIES` | No | Retries when an exit node is blocked; each one rotates to a fresh IP. Default `2`. Webshare's own default is 10, which can occupy a worker thread for two minutes. |
@@ -140,9 +158,9 @@ touches YouTube.
 The server side of email-and-password accounts is in place: sign-up with email
 confirmation, log in and out, and password reset, through Supabase Auth. This server
 makes every call to Supabase and keeps the session in HttpOnly cookies, so the browser
-never sees a token. **The site does not use it yet** — there are no account pages or
-links — and until both variables are set every `/api/auth` route answers `503` with
-`"reason": "auth_unavailable"`, and `/auth/confirm` answers `404`.
+never sees a token. Until both variables are set every `/api/auth` route answers `503`
+with `"reason": "auth_unavailable"`, `/auth/confirm` answers `404`, the Sign in links stay
+hidden, and `/account` says accounts aren't available yet.
 
 To connect Supabase:
 
@@ -169,8 +187,7 @@ Every email link is built from `SITE_URL`, so a preview deploy on another addres
 its own `SITE_URL`, and that address's `/auth/callback` added to the Redirect URLs.
 Passwords need at least 8 characters, plus whatever stricter rules are set in Supabase.
 
-**Building the account pages.** Email links end on three paths, and the frontend has to
-serve them:
+**The account pages.** Email links end on three paths, all served by `account.js`:
 
 - `/auth/callback` — Supabase's default templates arrive here with the new session in
   the URL fragment (`#access_token=…&refresh_token=…&type=recovery`). Remove it from the
@@ -198,7 +215,19 @@ their plan in Stripe's Customer Portal, so no Stripe script runs on this site.
   from Stripe first, so a repeated or out-of-order event cannot leave the wrong plan.
 - **Access** holds while the subscription is `active`, `trialing` or `past_due` (Stripe
   retrying a failed renewal). In code, `_plan_for(user)` returns `"pro"` or `"free"`.
-  What Pro unlocks is not decided yet, so nothing is gated on it.
+  `/api/analyze` reads it from the session cookie on every call.
+
+**What Pro unlocks.** A free analysis checks the 5 most significant claims, each with a
+verdict, a 1–2 sentence explanation and its sources, and reports how many checkable
+claims the model found in all. A Pro analysis checks up to 20, and adds for each claim a
+confidence score (0–100), a category, *what the video says* next to *what scholarship
+says*, competing interpretations, and where to dig deeper (a trusted domain and a search
+phrase, never an invented title). For the whole video it adds the most significant
+errors, what the video leaves out, and metrics. The metrics are computed by the server
+from the verdicts, not asked of the model: an accuracy score (Supported 1, Mixed ½,
+Unsupported 0, Insufficient Evidence left out), counts by verdict and by category, and
+the average confidence. Pro has its own output budget, timeout, rate limit and daily
+budget (the `*_PRO` variables above).
 
 To connect Stripe:
 
@@ -215,7 +244,10 @@ To connect Stripe:
 
 Locally, run `stripe listen --forward-to localhost:8000/api/stripe/webhook` and use the
 `whsec_...` it prints. Checkout comes back to `/account?checkout=success`, and a cancelled
-checkout to `/pricing?checkout=cancelled`. The frontend has to serve both pages.
+checkout to `/pricing?checkout=cancelled`.
+
+Starting a checkout first expires any checkout the customer still has open, so two tabs
+(or a monthly and a yearly click) cannot both be paid and leave two subscriptions.
 
 ## API
 
@@ -223,6 +255,7 @@ checkout to `/pricing?checkout=cancelled`. The frontend has to serve both pages.
 | --- | --- |
 | `GET /` | Landing page |
 | `GET /app` | Analyzer; accepts `?q=` to prefill the input |
+| `GET /pricing`, `/account`, `/auth/callback`, `/reset-password`, `/privacy` | Plans, account, email-link landing, new password, privacy |
 | `GET /health` | Liveness + configuration status |
 | `GET /api/config` | Tells the frontend whether live analysis is available |
 | `POST /api/analyze` | `{"url": "..."}` (max 2000 chars) or `{"title": "..."}` (3–300 chars) |
@@ -261,6 +294,13 @@ The response carries `basis: "transcript" | "title"`. A `title` analysis never r
 video, and the page marks it as such — do not present the two identically. A transcript
 analysis reads the video's English captions when it has any, and otherwise whatever
 captions it does have; the analysis itself is always written in English.
+
+The response also carries `plan` (`"free"` or `"pro"`) and `claims_limit`. A free
+response adds `claims_found`; a Pro response adds `metrics`, `key_errors`, `omissions`
+and the per-claim fields above. Fields that belong to the other plan are `null`.
+
+Every page answers `HEAD` as well as `GET`. A browser that asks for an unknown path gets
+the HTML 404 page; an API caller still gets `{"detail": "Not found."}`.
 
 The interactive API docs (`/docs`, `/redoc`, `/openapi.json`) are disabled.
 

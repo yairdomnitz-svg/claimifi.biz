@@ -183,7 +183,10 @@ def test_proxy_hint_depends_on_whether_a_proxy_is_configured(patched_fetch):
     main = patched_fetch(raise_blocked)
     with pytest.raises(HTTPException) as exc:
         main._fetch_transcript_sync("dQw4w9WgXcQ")
-    assert "WEBSHARE_PROXY_USERNAME" in exc.value.detail
+    # The operator's fix goes to the log; the visitor is pointed at the title
+    # path instead of being shown environment variable names.
+    assert "WEBSHARE_PROXY_USERNAME" not in exc.value.detail
+    assert "title" in exc.value.detail.lower()
 
     main = patched_fetch(raise_blocked, WEBSHARE_PROXY_USERNAME="u", WEBSHARE_PROXY_PASSWORD="p")
     with pytest.raises(HTTPException) as exc:

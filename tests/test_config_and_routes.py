@@ -169,7 +169,7 @@ def test_pages_carry_a_content_hash_so_a_deploy_busts_caches(client):
 
     _, c = client()
     digest = hashlib.sha256()
-    for name in ("styles.css", "app.js", "favicon.svg"):
+    for name in ("styles.css", "app.js", "account.js", "favicon.svg"):
         digest.update((REPO / name).read_bytes())
     expected = digest.hexdigest()[:10]
 
@@ -191,7 +191,7 @@ def test_the_hash_changes_when_an_asset_changes(fresh_main, tmp_path, monkeypatc
 
     shadow = tmp_path / "site"
     shadow.mkdir()
-    for name in ("styles.css", "app.js", "favicon.svg", "index.html", "app.html"):
+    for name in ("styles.css", "app.js", "account.js", "favicon.svg", "index.html", "app.html"):
         (shadow / name).write_bytes((REPO / name).read_bytes())
     monkeypatch.setattr(module, "FRONTEND_DIR", shadow)
 

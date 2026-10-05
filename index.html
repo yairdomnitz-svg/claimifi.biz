@@ -1,23 +1,23 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-accounts="__ACCOUNTS__" data-billing="__BILLING__">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#ffffff">
 
 <title>Claimifi.biz | Fact-Check History Claims in YouTube Videos</title>
-<meta name="description" content="Paste a YouTube history video and Claimifi.biz extracts every historical claim, then checks each one against 32 academic, archival, and fact-checking sources. Free, instant, source-cited.">
+<meta name="description" content="Paste a YouTube history video and Claimifi.biz checks its historical claims against 32 academic, archival and fact-checking sources, with citations.">
 <meta name="keywords" content="fact check youtube, history fact checker, verify historical claims, ancient history fact check, AI fact checking, historical accuracy checker">
 <meta name="author" content="Claimifi.biz">
 <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1">
-<link rel="canonical" href="https://claimifi.biz/">
+<link rel="canonical" href="__SITE_URL__/">
 
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="Claimifi.biz">
 <meta property="og:title" content="Claimifi.biz | Fact-Check History Claims in YouTube Videos">
 <meta property="og:description" content="Paste a YouTube history video. Get every historical claim checked against 32 academic, archival, and fact-checking sources.">
-<meta property="og:url" content="https://claimifi.biz/">
-<meta property="og:image" content="https://claimifi.biz/og-image.png">
+<meta property="og:url" content="__SITE_URL__/">
+<meta property="og:image" content="__SITE_URL__/og-image.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
 <meta property="og:image:alt" content="Claimifi.biz — fact-check history on YouTube">
@@ -26,7 +26,7 @@
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="Claimifi.biz | Fact-Check History Claims in YouTube Videos">
 <meta name="twitter:description" content="Paste a YouTube history video. Get every historical claim checked against 32 academic, archival, and fact-checking sources.">
-<meta name="twitter:image" content="https://claimifi.biz/og-image.png">
+<meta name="twitter:image" content="__SITE_URL__/og-image.png">
 <meta name="twitter:image:alt" content="Claimifi.biz — fact-check history on YouTube">
 
 <link rel="icon" href="/favicon.svg?v=__ASSET_V__" type="image/svg+xml">
@@ -43,9 +43,9 @@
   "@graph": [
     {
       "@type": "WebApplication",
-      "@id": "https://claimifi.biz/#app",
+      "@id": "__SITE_URL__/#app",
       "name": "Claimifi.biz",
-      "url": "https://claimifi.biz/",
+      "url": "__SITE_URL__/",
       "applicationCategory": "EducationalApplication",
       "operatingSystem": "Any",
       "browserRequirements": "Requires JavaScript",
@@ -59,14 +59,14 @@
     },
     {
       "@type": "WebSite",
-      "@id": "https://claimifi.biz/#website",
-      "url": "https://claimifi.biz/",
+      "@id": "__SITE_URL__/#website",
+      "url": "__SITE_URL__/",
       "name": "Claimifi.biz",
       "description": "Fact-check historical claims made in YouTube videos."
     },
     {
       "@type": "HowTo",
-      "@id": "https://claimifi.biz/#howto",
+      "@id": "__SITE_URL__/#howto",
       "name": "How to fact-check a YouTube history video",
       "totalTime": "PT1M",
       "step": [
@@ -77,7 +77,7 @@
     },
     {
       "@type": "FAQPage",
-      "@id": "https://claimifi.biz/#faq",
+      "@id": "__SITE_URL__/#faq",
       "mainEntity": [
         { "@type": "Question", "name": "How does Claimifi.biz fact-check YouTube history videos?", "acceptedAnswer": { "@type": "Answer", "text": "Claimifi.biz retrieves the video's caption track, extracts each distinct historical claim, and evaluates every claim against a fixed list of academic, archival, and fact-checking domains. Each claim receives one of four verdicts along with an explanation and the sources consulted." } },
         { "@type": "Question", "name": "Which sources does Claimifi.biz use?", "acceptedAnswer": { "@type": "Answer", "text": "Analysis is constrained to 32 domains covering historical associations, peer-reviewed journal databases, national archives, film and media archives, university presses, and established fact-checking organisations. The full list is published on the site." } },
@@ -106,9 +106,12 @@
       <a href="#example">Example</a>
       <a href="#sources">Sources</a>
       <a href="#faq">FAQ</a>
+      <a href="/pricing" class="needs-billing">Pricing</a>
     </nav>
     <div class="nav-right">
       <span class="status" id="status" role="status"><span class="dot" aria-hidden="true"></span><span id="statusText">Checking…</span></span>
+      <span class="plan-badge" id="navPlan" hidden>Pro</span>
+      <a class="nav-account needs-accounts" id="navAccount" href="/account">Sign in</a>
       <a class="btn-sm" href="/app">Open the app</a>
     </div>
   </div>
@@ -327,7 +330,7 @@
         </details>
         <details class="faq">
           <summary>Is Claimifi.biz free to use?</summary>
-          <div class="a">Yes, and there is no sign-up. A per-visitor rate limit applies so the service stays available to everyone.</div>
+          <div class="a">Yes, and there is no sign-up. The free plan checks the 5 most significant claims in each video, and a per-visitor rate limit applies so the service stays available to everyone.<span class="needs-billing"> A paid <a href="/pricing">Pro plan</a> checks up to 20 claims with a deeper analysis of each.</span></div>
         </details>
         <details class="faq">
           <summary>Why did my YouTube link fail?</summary>
@@ -382,6 +385,15 @@
           <li><a href="#sources">Trusted sources</a></li>
           <li><a href="#faq">FAQ</a></li>
           <li><a href="#why">Why it matters</a></li>
+        </ul>
+      </div>
+      <div class="foot-col">
+        <h3>Company</h3>
+        <ul>
+          <li class="needs-billing"><a href="/pricing">Pricing</a></li>
+          <li class="needs-accounts"><a href="/account">Account</a></li>
+          <li><a href="/privacy">Privacy</a></li>
+          <!--contact-link-->
         </ul>
       </div>
     </div>

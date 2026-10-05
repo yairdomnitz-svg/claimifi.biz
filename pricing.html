@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en" data-accounts="__ACCOUNTS__" data-billing="__BILLING__">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#ffffff">
+
+<title>Pricing | Claimifi.biz</title>
+<meta name="description" content="Claimifi.biz is free for a quick check of any history video. Pro checks up to 20 claims with confidence scores, comparisons with scholarship and metrics.">
+<meta name="robots" content="index, follow">
+<link rel="canonical" href="__SITE_URL__/pricing">
+<link rel="icon" href="/favicon.svg?v=__ASSET_V__" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Lato:ital,wght@0,400;0,700;1,700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/styles.css?v=__ASSET_V__">
+</head>
+<body data-page="pricing">
+
+<a href="#main" class="skip">Skip to content</a>
+
+<header>
+  <div class="wrap nav">
+    <a href="/" class="brand" aria-label="Claimifi.biz home">
+      <img class="brand-mark" src="/favicon.svg?v=__ASSET_V__" alt="" width="34" height="34">
+      <span class="brand-name">Claimifi<span>.biz</span></span>
+    </a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="/app">Analyzer</a>
+      <a href="/#how">How it works</a>
+      <a href="/pricing" class="needs-billing">Pricing</a>
+    </nav>
+    <div class="nav-right">
+      <span class="status" id="status" role="status"><span class="dot" aria-hidden="true"></span><span id="statusText">Checking…</span></span>
+      <span class="plan-badge" id="navPlan" hidden>Pro</span>
+      <a class="nav-account needs-accounts" id="navAccount" href="/account">Sign in</a>
+    </div>
+  </div>
+</header>
+
+<main id="main" tabindex="-1">
+  <div class="wrap">
+    <div class="page-head">
+      <h1>Plans</h1>
+      <p class="lede">Free for a quick check of any video. Pro for the full picture: every claim, weighed against the scholarship.</p>
+      <div class="interval needs-billing" role="group" aria-label="Billing period">
+        <button type="button" id="intervalMonthly" aria-pressed="true">Monthly</button>
+        <button type="button" id="intervalYearly" aria-pressed="false">Yearly <span class="save" id="yearlySave"></span></button>
+      </div>
+    </div>
+
+    <p class="msg info" id="pricingMsg" role="status" style="max-width:820px;margin:24px auto 0"></p>
+
+    <div class="plans">
+      <section class="plan" aria-labelledby="freeTitle">
+        <h2 id="freeTitle">Free</h2>
+        <p class="plan-desc">A quick, sourced check of the claims that matter most.</p>
+        <div class="price"><span class="price-n">$0</span><span class="price-per">forever</span></div>
+        <p class="price-note">No account needed.</p>
+        <ul class="features">
+          <li>The 5 most significant claims in each video</li>
+          <li>A verdict on every claim, with a short explanation</li>
+          <li>The trusted domains behind each verdict</li>
+          <li>Title-only checks for videos without captions</li>
+        </ul>
+        <a class="btn-ghost" href="/app">Open the analyzer</a>
+      </section>
+
+      <section class="plan pro" aria-labelledby="proTitle">
+        <h2 id="proTitle">Pro <span class="plan-badge">Deeper</span></h2>
+        <p class="plan-desc">An in-depth analysis of everything the video claims.</p>
+        <div class="price"><span class="price-n" id="proPrice">—</span><span class="price-per" id="proPer"></span></div>
+        <p class="price-note" id="proNote"></p>
+        <ul class="features">
+          <li>Up to 20 claims checked per video</li>
+          <li>A confidence score on every verdict</li>
+          <li>What the video says, next to what scholarship says</li>
+          <li>Competing interpretations historians hold</li>
+          <li>An accuracy score and verdict metrics</li>
+          <li>The biggest errors, and what the video leaves out</li>
+          <li>Where to dig deeper on the trusted sources</li>
+          <li>A higher analysis limit, tied to your account</li>
+        </ul>
+        <button class="btn needs-billing" type="button" id="subscribeBtn">Subscribe to Pro</button>
+        <p class="muted billing-off-only">Pro is coming soon.</p>
+      </section>
+    </div>
+
+    <p class="fine needs-billing">Payments are handled by Stripe. Cancel or switch between monthly and yearly at any time from your account; a cancelled plan stays active until the end of the period you paid for.</p>
+
+  </div>
+</main>
+
+<footer>
+  <div class="wrap">
+    <div class="foot-base" style="border:0;padding-top:0">
+      <p>Claimifi.biz is an educational tool. Always cross-check important historical claims against primary sources and peer-reviewed scholarship. &nbsp;·&nbsp; <a href="/">Home</a> &nbsp;·&nbsp; <a href="/app">Analyzer</a> <span class="needs-billing">&nbsp;·&nbsp; <a href="/pricing">Pricing</a></span> &nbsp;·&nbsp; <a href="/privacy">Privacy</a><!--contact-inline--></p>
+    </div>
+  </div>
+</footer>
+
+<script src="/app.js?v=__ASSET_V__" defer></script>
+<script src="/account.js?v=__ASSET_V__" defer></script>
+</body>
+</html>

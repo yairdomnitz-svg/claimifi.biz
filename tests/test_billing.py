@@ -97,6 +97,7 @@ def billing(client):
         module._auth_client = supa
         module._stripe_client = stripe
         stripe.on("GET", "/prices", body=PRICES)
+        stripe.on("GET", "/checkout/sessions", body={"object": "list", "data": []})
         return module, c, supa, stripe
 
     return _make

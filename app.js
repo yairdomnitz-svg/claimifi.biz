@@ -4,14 +4,32 @@
 (function () {
   'use strict';
 
-  // The server allows ~120s for Grok plus transcript time. The client budget must
-  // exceed it, or real results get discarded moments before they arrive.
-  var REQUEST_TIMEOUT_MS = 180000;
+  // The server allows up to ~200s for a Pro analysis plus the transcript fetch.
+  // The client budget must exceed it, or real results get discarded moments
+  // before they arrive.
+  var REQUEST_TIMEOUT_MS = 270000;
 
   var $ = function (id) { return document.getElementById(id); };
   var input = $('videoInput');
   var results = $('results');
   var btn = $('analyzeBtn');
+  var txToggle = $('transcriptToggle');
+
+  // Off by default while the deploy has no residential proxy: YouTube refuses
+  // caption requests from cloud hosts, so a link is checked on its title.
+  var useTranscript = false;
+  try { useTranscript = localStorage.getItem('useTranscript') === '1'; } catch (e) { /* storage blocked */ }
+  function syncToggle() {
+    if (txToggle) txToggle.setAttribute('aria-checked', useTranscript ? 'true' : 'false');
+  }
+  syncToggle();
+  if (txToggle) {
+    txToggle.addEventListener('click', function () {
+      useTranscript = !useTranscript;
+      syncToggle();
+      try { localStorage.setItem('useTranscript', useTranscript ? '1' : '0'); } catch (e) { /* storage blocked */ }
+    });
+  }
 
   function esc(s) {
     return String(s == null ? '' : s)
@@ -29,8 +47,11 @@
   // Hyphenated words are excluded for the same reason: "Anglo-Saxon" and
   // "Greco-Roman" are 11 characters too. Kept identical to
   // _VIDEO_ID_PATTERNS[1] in main.py.
+  //
+  // Hosts are case-insensitive: "YouTube.com" in a pasted link was sent as a
+  // title and billed as a title analysis of the URL string.
   function looksLikeVideo(q) {
-    return /youtube\.com|youtu\.be|youtube-nocookie\.com/.test(q) ||
+    return /youtube\.com|youtu\.be|youtube-nocookie\.com/i.test(q) ||
            /^(?=[a-zA-Z0-9_-]{11}$)(?![A-Za-z][a-z]+(?:-[A-Za-z][a-z]+)+$)[a-zA-Z]*[0-9_-][a-zA-Z0-9_-]*$/.test(q);
   }
 
@@ -196,6 +217,24 @@
     })
     .catch(function () { setStatus('demo', 'Unavailable'); });
 
+  /* ---------------- Plan and account in the header ---------------- */
+
+  var BILLING_ON = document.documentElement.getAttribute('data-billing') === 'on';
+
+  // Only once payments exist: until then there is no plan to show, and the
+  // request would be one more for every visitor on every page.
+  if (BILLING_ON) {
+    fetch('/api/billing/status', { cache: 'no-store', credentials: 'same-origin' })
+      .then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); })
+      .then(function (b) {
+        var badge = $('navPlan');
+        if (badge) badge.hidden = b.plan !== 'pro';
+        var acct = $('navAccount');
+        if (acct) acct.textContent = b.signed_in ? 'Account' : 'Sign in';
+      })
+      .catch(function () { /* the header simply keeps its defaults */ });
+  }
+
   if (!input || !results || !btn) return;
 
   // Say so up front rather than letting someone type a URL, wait, and get an
@@ -217,26 +256,45 @@
 
   /* ---------------- Rendering ---------------- */
 
-  function shell(pillClass, pillText, body, extra) {
+  var CLOSE_ICON =
+    '<svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+    '<path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>';
+
+  // `closable` adds an X that dismisses the panel and hands focus back to the
+  // input, ready for the next video.
+  function shell(pillClass, pillText, body, extra, closable) {
     results.innerHTML =
       '<div class="panel">' +
         '<div class="panel-head">' +
           '<h2>Analysis</h2>' +
           '<span class="pill ' + pillClass + '">' + esc(pillText) + '</span>' +
           (extra || '') +
+          (closable ? '<button class="panel-close" type="button" id="closeBtn" aria-label="Close this analysis">' + CLOSE_ICON + '</button>' : '') +
         '</div>' + body +
       '</div>';
+    var close = $('closeBtn');
+    if (close) {
+      close.addEventListener('click', function () {
+        results.innerHTML = '';
+        announce('Analysis closed.');
+        input.focus();
+      });
+    }
   }
 
-  function renderLoading() {
+  // A title run never fetches a transcript, so its first step must not claim
+  // one was fetched: the page's whole stance is telling those two apart.
+  function renderLoading(titleOnly) {
+    var steps = titleOnly
+      ? ['Reading the title', 'Identifying the claims such videos make', 'Checking against trusted sources', 'Writing sourced verdicts']
+      : ['Fetching the transcript', 'Extracting historical claims', 'Checking against trusted sources', 'Writing sourced verdicts'];
     shell('busy', 'Working',
       '<div class="loading">' +
         '<div class="spinner" role="presentation"></div>' +
         '<div class="steps">' +
-          '<div class="step" id="s0"><span class="box"></span>Fetching the transcript</div>' +
-          '<div class="step" id="s1"><span class="box"></span>Extracting historical claims</div>' +
-          '<div class="step" id="s2"><span class="box"></span>Checking against trusted sources</div>' +
-          '<div class="step" id="s3"><span class="box"></span>Writing sourced verdicts</div>' +
+          steps.map(function (text, i) {
+            return '<div class="step" id="s' + i + '"><span class="box"></span>' + esc(text) + '</div>';
+          }).join('') +
         '</div>' +
         '<div class="elapsed" id="elapsed" aria-hidden="true">0s elapsed</div>' +
       '</div>');
@@ -264,9 +322,26 @@
         '<div class="label">Could not complete the analysis</div>' +
         '<p style="color:var(--text-2)">' + esc(msg) + '</p>' +
         (retryable ? '<button class="ghost" type="button" id="retryBtn" style="margin-top:16px;margin-left:0">Try again</button>' : '') +
-      '</div>');
+      '</div>', '', true);
     var r = $('retryBtn');
     if (r) r.addEventListener('click', run);
+  }
+
+  /* ---------------- Input hint ---------------- */
+
+  var hintEl = $('inputHint');
+
+  function hint(text) {
+    if (hintEl) hintEl.textContent = text || '';
+    if (text) input.setAttribute('aria-invalid', 'true');
+    else input.removeAttribute('aria-invalid');
+  }
+
+  input.addEventListener('input', function () { hint(''); });
+
+  // Characters that render as nothing, as the server's _visible_text drops them.
+  function visibleLength(q) {
+    return q.replace(/[­​-‏‪-‮⁠-⁤﻿]/g, '').trim().length;
   }
 
   function tagLinks(list) {
@@ -280,17 +355,124 @@
   var TITLE_ONLY_NOTE = 'No transcript was read. This covers the claims a video with this ' +
     'title typically makes, not what this video actually says.';
 
+  function pct(n) {
+    var v = parseInt(n, 10);
+    return isNaN(v) ? null : Math.max(0, Math.min(100, v));
+  }
+
+  function bulletList(cls, items) {
+    return '<ul class="' + cls + '">' + items.map(function (t) { return '<li>' + esc(t) + '</li>'; }).join('') + '</ul>';
+  }
+
+  function arr(v) { return Array.isArray(v) ? v : []; }
+
+  /* ---------- Pro: per-claim depth ---------- */
+
+  function proClaimExtras(c) {
+    var html = '';
+    if (c.video_says || c.scholarship_says) {
+      html += '<div class="versus">' +
+        '<div class="versus-col"><div class="versus-h">The video says</div><p>' + esc(c.video_says || '—') + '</p></div>' +
+        '<div class="versus-col scholarship"><div class="versus-h">Scholarship says</div><p>' + esc(c.scholarship_says || '—') + '</p></div>' +
+      '</div>';
+    }
+    var views = arr(c.competing_views);
+    if (views.length) html += '<div class="sub-h">Competing views</div>' + bulletList('views', views);
+    var dig = arr(c.dig_deeper).filter(function (d) { return d && d.domain && d.search; });
+    if (dig.length) {
+      html += '<div class="sub-h">Dig deeper</div><ul class="dig">' + dig.map(function (d) {
+        return '<li><a href="https://' + esc(d.domain) + '" target="_blank" rel="noopener nofollow">' + esc(d.domain) +
+          '</a> — search “' + esc(d.search) + '”</li>';
+      }).join('') + '</ul>';
+    }
+    return html;
+  }
+
+  function confidenceHtml(n) {
+    var v = pct(n);
+    if (v === null) return '';
+    return '<span class="confidence"><span>Confidence</span>' +
+      '<span class="meter" aria-hidden="true"><span style="width:' + v + '%"></span></span>' +
+      '<span class="confidence-n">' + v + '%</span></span>';
+  }
+
+  /* ---------- Pro: whole-video sections ---------- */
+
+  var VERDICT_ORDER = [
+    ['supported', 'Supported'], ['mixed', 'Mixed'],
+    ['unsupported', 'Unsupported'], ['insufficient', 'Insufficient']
+  ];
+
+  function proMetricsHtml(m, counts) {
+    if (!m) return '';
+    var score = pct(m.accuracy_score);
+    var conf = pct(m.average_confidence);
+    var total = VERDICT_ORDER.reduce(function (s, d) { return s + counts[d[0]]; }, 0);
+    var bar = total ? '<div class="verdict-bar" aria-hidden="true">' + VERDICT_ORDER.map(function (d) {
+      var w = counts[d[0]] / total * 100;
+      return w ? '<span data-v="' + d[0] + '" style="width:' + w.toFixed(1) + '%"></span>' : '';
+    }).join('') + '</div>' : '';
+    var cats = Object.keys(m.by_category || {}).map(function (k) {
+      return '<span class="tag">' + esc(k) + ' · ' + esc(m.by_category[k]) + '</span>';
+    }).join('');
+    return '<div class="panel-body">' +
+      '<div class="label">Metrics</div>' +
+      '<div class="metrics">' +
+        '<div class="metric score"><div class="metric-v">' + (score === null ? '—' : score + '%') + '</div>' +
+          '<div class="metric-k">Accuracy score</div>' +
+          '<div class="metric-note">' + (score === null
+            ? 'No claim could be judged either way.'
+            : 'Supported counts 1, Mixed ½, Unsupported 0, over ' + esc(m.claims_judged) + ' judged claim' + (m.claims_judged === 1 ? '' : 's') + '.') +
+          '</div></div>' +
+        '<div class="metric"><div class="metric-v">' + (conf === null ? '—' : conf + '%') + '</div><div class="metric-k">Average confidence</div></div>' +
+        '<div class="metric"><div class="metric-v">' + esc(m.claims_checked) + '</div><div class="metric-k">Claims checked</div></div>' +
+      '</div>' + bar +
+      (cats ? '<div class="sub-h">Claims by type</div><div class="cats">' + cats + '</div>' : '') +
+    '</div>';
+  }
+
+  function findingsHtml(label, cls, items) {
+    items = arr(items);
+    if (!items.length) return '';
+    return '<div class="panel-body"><div class="label">' + esc(label) + '</div>' + bulletList('findings ' + cls, items) + '</div>';
+  }
+
+  /* ---------- Free: what Pro adds ---------- */
+
+  var PRO_FEATURES = [
+    'Up to 20 claims checked per video',
+    'A confidence score on every verdict',
+    'What the video says, next to what scholarship says',
+    'Competing interpretations historians hold',
+    'An accuracy score and verdict metrics',
+    'The biggest errors, and what the video leaves out',
+    'Where to dig deeper on the trusted sources'
+  ];
+
+  function upsellHtml(data, checked) {
+    var found = parseInt(data.claims_found, 10);
+    var lead = !isNaN(found) && found > checked
+      ? 'This video makes about ' + found + ' checkable claims. The free plan checks the ' + checked + ' most significant.'
+      : 'The free plan checks up to ' + esc(data.claims_limit || 5) + ' claims per video.';
+    return '<div class="panel-body upsell">' +
+      '<div class="label">Go deeper with Pro</div>' +
+      '<p>' + esc(lead) + ' Pro adds:</p>' +
+      bulletList('locked', PRO_FEATURES) +
+      (BILLING_ON
+        ? '<a class="btn btn-upsell" href="/pricing">See Pro plans</a>'
+        : '<p class="muted">Pro is coming soon.</p>') +
+    '</div>';
+  }
+
   function renderAnalysis(data) {
     var claims = Array.isArray(data.claims) ? data.claims : [];
     var titleOnly = data.basis === 'title';
+    var pro = data.plan === 'pro';
 
     var counts = { supported: 0, mixed: 0, unsupported: 0, insufficient: 0 };
     claims.forEach(function (c) { counts[verdictKey(c.verdict)]++; });
 
-    var tally = [
-      ['supported', 'Supported'], ['mixed', 'Mixed'],
-      ['unsupported', 'Unsupported'], ['insufficient', 'Insufficient']
-    ].map(function (d) {
+    var tally = VERDICT_ORDER.map(function (d) {
       return '<div class="tally-item" data-v="' + d[0] + '">' +
                '<div class="n">' + counts[d[0]] + '</div><div class="t">' + d[1] + '</div>' +
              '</div>';
@@ -304,8 +486,13 @@
                  '<span class="claim-n">' + (i + 1) + '</span>' +
                  '<span class="claim-text">' + esc(c.claim) + '</span>' +
                '</div>' +
-               '<span class="verdict" data-v="' + k + '">' + esc(c.verdict) + '</span>' +
+               '<div class="claim-meta">' +
+                 '<span class="verdict" data-v="' + k + '">' + esc(c.verdict) + '</span>' +
+                 (pro && c.category ? '<span class="cat">' + esc(c.category) + '</span>' : '') +
+                 (pro ? confidenceHtml(c.confidence) : '') +
+               '</div>' +
                '<div class="claim-why">' + esc(c.explanation) + '</div>' +
+               (pro ? proClaimExtras(c) : '') +
                (srcs ? '<div class="tags">' + srcs + '</div>' : '') +
              '</div>';
     }).join('');
@@ -330,24 +517,30 @@
       '<div class="panel-body">' +
         '<div class="label">Verdict breakdown</div><div class="tally">' + tally + '</div>' +
       '</div>' +
+      (pro ? proMetricsHtml(data.metrics, counts) : '') +
       '<div class="panel-body">' +
         '<div class="label">' + claims.length + ' claim' + (claims.length === 1 ? '' : 's') + ' checked</div>' +
         (claimsHtml || '<p style="color:var(--text-2)">No distinct claims were extracted from this video.</p>') +
       '</div>' +
+      (pro ? findingsHtml('Most significant errors', 'errors', data.key_errors) : '') +
+      (pro ? findingsHtml('What the video leaves out', 'gaps', data.omissions) : '') +
       '<div class="panel-body">' +
         '<div class="label">Overall assessment</div>' +
         '<p style="color:var(--text-2)">' + esc(data.overall_assessment) + '</p>' +
       '</div>' +
+      (pro ? '' : upsellHtml(data, claims.length)) +
       '<div class="panel-body">' +
         '<div class="label">Sources consulted</div>' +
         '<div class="tags">' + (used || '<span style="color:var(--text-3)">None reported</span>') + '</div>' +
         '<p style="font-size:.8rem;color:var(--text-3);margin-top:16px">' + esc(data.note || '') + '</p>' +
       '</div>',
+      (pro ? '<span class="pill pro">Pro</span>' : '') +
       '<button class="ghost" type="button" id="copyBtn">' +
         '<svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
         '<rect x="9" y="9" width="13" height="13" rx="2"/>' +
         '<path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>' +
-        '<span id="copyLabel">Copy report</span></button>');
+        '<span id="copyLabel">Copy report</span></button>',
+      true);
 
     var copyBtn = $('copyBtn');
     if (copyBtn) {
@@ -356,14 +549,29 @@
         // Without this a pasted title-only report reads exactly like one that
         // checked the transcript: the badge that says otherwise stays on the page.
         if (titleOnly) lines.push('Title only: ' + TITLE_ONLY_NOTE);
+        if (pro && data.metrics) {
+          var m = data.metrics;
+          lines.push('Pro analysis. Accuracy score: ' + (pct(m.accuracy_score) === null ? 'n/a' : pct(m.accuracy_score) + '%') +
+            '; average confidence: ' + (pct(m.average_confidence) === null ? 'n/a' : pct(m.average_confidence) + '%') + '.');
+        }
         lines.push('');
         claims.forEach(function (c, i) {
           lines.push((i + 1) + '. ' + c.claim);
-          lines.push('   Verdict: ' + c.verdict);
+          lines.push('   Verdict: ' + c.verdict + (pro && pct(c.confidence) !== null ? ' (confidence ' + pct(c.confidence) + '%)' : ''));
           lines.push('   ' + c.explanation);
+          if (pro) {
+            if (c.video_says) lines.push('   The video says: ' + c.video_says);
+            if (c.scholarship_says) lines.push('   Scholarship says: ' + c.scholarship_says);
+            arr(c.competing_views).forEach(function (v) { lines.push('   Competing view: ' + v); });
+            arr(c.dig_deeper).forEach(function (d) { lines.push('   Dig deeper: ' + d.domain + ' — search "' + d.search + '"'); });
+          }
           if (c.sources && c.sources.length) lines.push('   Sources: ' + c.sources.join(', '));
           lines.push('');
         });
+        if (pro) {
+          arr(data.key_errors).forEach(function (t, i) { if (i === 0) lines.push('Most significant errors:'); lines.push(' - ' + t); });
+          arr(data.omissions).forEach(function (t, i) { if (i === 0) lines.push('What the video leaves out:'); lines.push(' - ' + t); });
+        }
         lines.push('Overall: ' + data.overall_assessment);
 
         // navigator.clipboard is undefined on any non-HTTPS origin, and the
@@ -394,13 +602,26 @@
   function run() {
     if (running || paused) return;
     var q = input.value.trim();
-    if (!q) { input.focus(); return; }
+    // Said next to the box, not by silently refocusing it. Checked here too so a
+    // too-short title never costs a request, though the server checks again.
+    if (!q) {
+      hint('Paste a YouTube link, or type a video title.');
+      input.focus();
+      return;
+    }
+    var asVideo = looksLikeVideo(q);
+    if (!asVideo && visibleLength(q) < 3) {
+      hint("Type at least 3 characters of the video's title, or paste its YouTube link.");
+      input.focus();
+      return;
+    }
+    hint('');
 
     running = true;
     btn.disabled = true;
     setBusy(true);
     announce('Analyzing. This usually takes about a minute.');
-    renderLoading();
+    renderLoading(!asVideo || !useTranscript);
     results.scrollIntoView({ block: 'start' });
 
     // Progress affordances on a rough schedule, not real server milestones.
@@ -423,6 +644,9 @@
       // re-enabling here left a button that looked live and did nothing.
       btn.disabled = paused;
       setBusy(false);
+      // Cleared only here, once the body has been read: clearing it when the
+      // headers arrived left a stalled body spinning with no limit at all.
+      clearTimeout(killer);
       timers.forEach(clearTimeout);
       clearInterval(tick);
     };
@@ -433,11 +657,11 @@
     fetch('/api/analyze', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(looksLikeVideo(q) ? { url: q } : { title: q }),
+      credentials: 'same-origin',
+      body: JSON.stringify(asVideo ? { url: q, transcript: useTranscript } : { title: q }),
       signal: ctrl.signal
     })
     .then(function (res) {
-      clearTimeout(killer);
       if (res.ok) {
         return res.json().then(function (d) {
           setStatus('live', 'Live');
@@ -465,16 +689,21 @@
           // whole purpose is telling those two apart.
           setStatus('demo', 'Not configured');
         }
-        renderError(
-          detailText(err.detail, res.status),
-          res.status >= 500 || res.status === 429
-        );
+        // "Try again" only where trying again can work: not on a deploy with
+        // no key, and not when the server says the wait is an hour or more
+        // (the day's budget is spent).
+        var wait = parseInt(res.headers.get('Retry-After') || '0', 10) || 0;
+        var retryable = (res.status >= 500 || res.status === 429) &&
+          err.reason !== 'no_api_key' && wait < 3600;
+        renderError(detailText(err.detail, res.status), retryable);
+        // Anything else in the 4xx range is about what was typed, so the box
+        // gets focus back - and scrolls into view - ready to be corrected.
+        if (res.status >= 400 && res.status < 500 && res.status !== 429) input.focus();
       });
     })
     .catch(function (e) {
-      clearTimeout(killer);
       if (e && e.name === 'AbortError') {
-        renderError('The analysis ran past three minutes and was stopped. Try a shorter video.', true);
+        renderError('The analysis ran past four and a half minutes and was stopped. Try a shorter video.', true);
       } else {
         // Offline, DNS, a dropped connection, or a reply this page could not
         // read. Every one of them is a failure to report, never a cue to

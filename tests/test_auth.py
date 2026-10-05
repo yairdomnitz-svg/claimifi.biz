@@ -200,7 +200,8 @@ def test_login_sets_two_httponly_lax_cookies_and_returns_no_tokens(auth):
     fake.on("POST", "/token?password", body=s)
     r = c.post("/api/auth/login", json=GOOD)
     assert r.status_code == 200
-    assert r.json() == {"user": {"email": "ada@example.com", "created_at": "2026-09-16T10:00:00Z"}}
+    assert r.json() == {"user": {"email": "ada@example.com", "created_at": "2026-09-16T10:00:00Z",
+                                 "display_name": "", "new_email": None}}
     assert s["access_token"] not in r.text and "rt-1" not in r.text
 
     cookies = set_cookies(r.headers)

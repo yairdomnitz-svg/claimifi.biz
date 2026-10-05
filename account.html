@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="en" data-accounts="__ACCOUNTS__" data-billing="__BILLING__">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#ffffff">
+
+<title>Your account | Claimifi.biz</title>
+<meta name="description" content="Sign in to Claimifi.biz to manage your plan.">
+<meta name="robots" content="noindex, follow">
+
+<link rel="icon" href="/favicon.svg?v=__ASSET_V__" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Lato:ital,wght@0,400;0,700;1,700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/styles.css?v=__ASSET_V__">
+</head>
+<body data-page="account">
+
+<a href="#main" class="skip">Skip to content</a>
+
+<header>
+  <div class="wrap nav">
+    <a href="/" class="brand" aria-label="Claimifi.biz home">
+      <img class="brand-mark" src="/favicon.svg?v=__ASSET_V__" alt="" width="34" height="34">
+      <span class="brand-name">Claimifi<span>.biz</span></span>
+    </a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="/app">Analyzer</a>
+      <a href="/#how">How it works</a>
+      <a href="/pricing" class="needs-billing">Pricing</a>
+    </nav>
+    <div class="nav-right">
+      <span class="status" id="status" role="status"><span class="dot" aria-hidden="true"></span><span id="statusText">Checking…</span></span>
+      <span class="plan-badge" id="navPlan" hidden>Pro</span>
+      <a class="nav-account needs-accounts" id="navAccount" href="/account">Sign in</a>
+    </div>
+  </div>
+</header>
+
+<main id="main" tabindex="-1">
+  <div class="wrap">
+    <div class="page-head">
+      <h1>Your account</h1>
+    </div>
+
+    <div class="auth-card accounts-off-only">
+      <h2>Accounts aren't available yet</h2>
+      <p>The analyzer works without one. <a href="/app">Open the analyzer</a>.</p>
+    </div>
+
+    <div class="auth-card needs-accounts" id="accountCard">
+      <p class="msg" id="accountMsg" role="status"></p>
+
+      <div id="signedOut" hidden>
+        <div class="tabs" role="tablist" aria-label="Sign in or create an account">
+          <button type="button" role="tab" id="tabLogin" aria-selected="true" aria-controls="loginForm">Log in</button>
+          <button type="button" role="tab" id="tabSignup" aria-selected="false" aria-controls="signupForm">Create account</button>
+        </div>
+
+        <form class="form" id="loginForm" role="tabpanel" aria-labelledby="tabLogin" novalidate>
+          <div class="form-field"><label for="loginEmail">Email</label><input type="email" id="loginEmail" autocomplete="email" required></div>
+          <div class="form-field"><label for="loginPassword">Password</label><input type="password" id="loginPassword" autocomplete="current-password" required></div>
+          <button class="btn" type="submit">Log in</button>
+          <button class="link-btn" type="button" id="showForgot">Forgot your password?</button>
+          <button class="link-btn" type="button" id="resendBtn" hidden>Send the confirmation email again</button>
+        </form>
+
+        <form class="form" id="signupForm" role="tabpanel" aria-labelledby="tabSignup" hidden novalidate>
+          <div class="form-field"><label for="signupEmail">Email</label><input type="email" id="signupEmail" autocomplete="email" required></div>
+          <div class="form-field">
+            <label for="signupPassword">Password</label>
+            <input type="password" id="signupPassword" autocomplete="new-password" minlength="8" required aria-describedby="signupHelp">
+            <p class="form-help" id="signupHelp">At least 8 characters.</p>
+          </div>
+          <button class="btn" type="submit">Create account</button>
+        </form>
+
+        <form class="form" id="forgotForm" hidden novalidate>
+          <p class="muted">Enter your email and we'll send a link to set a new password.</p>
+          <div class="form-field"><label for="forgotEmail">Email</label><input type="email" id="forgotEmail" autocomplete="email" required></div>
+          <button class="btn" type="submit">Send reset link</button>
+          <button class="link-btn" type="button" id="backToLogin">Back to log in</button>
+        </form>
+      </div>
+
+      <div id="signedIn" hidden>
+        <section class="acct-section" aria-labelledby="profileH">
+          <h2 id="profileH">Profile</h2>
+          <dl class="kv">
+            <dt>Name</dt><dd id="acctName">—</dd>
+            <dt>Email</dt><dd id="acctEmail"></dd>
+            <dt>Member since</dt><dd id="acctSince"></dd>
+          </dl>
+          <p class="msg info" id="pendingEmail" hidden></p>
+          <form class="form" id="profileForm" novalidate>
+            <div class="form-field">
+              <label for="displayName">Display name</label>
+              <input type="text" id="displayName" autocomplete="name" maxlength="80">
+            </div>
+            <button class="btn-ghost" type="submit">Save name</button>
+          </form>
+          <form class="form" id="emailForm" novalidate style="margin-top:18px">
+            <div class="form-field">
+              <label for="newEmail">Change email</label>
+              <input type="email" id="newEmail" autocomplete="email" required aria-describedby="newEmailHelp">
+              <p class="form-help" id="newEmailHelp">We'll send a confirmation link. Your email changes once you open it.</p>
+            </div>
+            <button class="btn-ghost" type="submit">Send confirmation link</button>
+          </form>
+        </section>
+
+        <hr class="divider">
+
+        <section class="acct-section needs-billing" aria-labelledby="planH">
+          <h2 id="planH">Subscription</h2>
+          <dl class="kv">
+            <dt>Plan</dt><dd id="acctPlan">Free</dd>
+            <dt class="plan-period" hidden id="acctPeriodLabel">Renews</dt><dd class="plan-period" hidden id="acctPeriod"></dd>
+          </dl>
+          <p class="msg info" id="cancelNotice" hidden></p>
+          <div class="btn-col">
+            <a class="btn" id="upgradeBtn" href="/pricing" hidden>Upgrade to Pro</a>
+            <button class="btn-ghost" type="button" id="resumeBtn" hidden>Keep my Pro plan</button>
+            <button class="btn-ghost" type="button" id="portalBtn" hidden>Change plan, card or see invoices</button>
+            <button class="btn-ghost danger" type="button" id="cancelBtn" hidden>Cancel subscription</button>
+          </div>
+          <div class="confirm-box" id="cancelConfirm" hidden>
+            <p>Cancel Pro? You keep it until <strong id="cancelUntil">the end of this billing period</strong>, then move to the free plan. You won't be charged again.</p>
+            <div class="btn-row">
+              <button class="btn-ghost danger" type="button" id="cancelYes">Yes, cancel</button>
+              <button class="btn-ghost" type="button" id="cancelNo">Keep Pro</button>
+            </div>
+          </div>
+        </section>
+
+        <hr class="divider needs-billing">
+
+        <section class="acct-section" aria-labelledby="securityH">
+          <h2 id="securityH">Password</h2>
+          <form class="form" id="passwordForm" novalidate>
+            <div class="form-field">
+              <label for="newPassword">New password</label>
+              <input type="password" id="newPassword" autocomplete="new-password" minlength="8" required aria-describedby="newPasswordHelp">
+              <p class="form-help" id="newPasswordHelp">At least 8 characters.</p>
+            </div>
+            <button class="btn-ghost" type="submit">Update password</button>
+          </form>
+        </section>
+
+        <hr class="divider">
+
+        <div class="btn-col">
+          <a class="btn-ghost" href="/app">Open the analyzer</a>
+          <button class="btn-ghost" type="button" id="logoutBtn">Sign out</button>
+        </div>
+
+        <hr class="divider">
+
+        <section class="acct-section danger-zone" aria-labelledby="deleteH">
+          <h2 id="deleteH">Delete account</h2>
+          <p class="muted">This permanently deletes your account and signs you out. Any subscription is cancelled at once, and the unused part of the current period isn't refunded. This can't be undone.</p>
+          <button class="btn-ghost danger" type="button" id="deleteStart" style="margin-top:14px">Delete my account…</button>
+          <form class="form confirm-box" id="deleteForm" hidden novalidate>
+            <div class="form-field">
+              <label for="deletePassword">Enter your password to confirm</label>
+              <input type="password" id="deletePassword" autocomplete="current-password" required>
+            </div>
+            <div class="form-field">
+              <label for="deleteConfirm">Type DELETE</label>
+              <input type="text" id="deleteConfirm" autocomplete="off" required>
+            </div>
+            <div class="btn-row">
+              <button class="btn-ghost danger" type="submit">Permanently delete</button>
+              <button class="btn-ghost" type="button" id="deleteCancel">Keep my account</button>
+            </div>
+          </form>
+        </section>
+      </div>
+    </div>
+
+  </div>
+</main>
+
+<footer>
+  <div class="wrap">
+    <div class="foot-base" style="border:0;padding-top:0">
+      <p>Claimifi.biz is an educational tool. Always cross-check important historical claims against primary sources and peer-reviewed scholarship. &nbsp;·&nbsp; <a href="/">Home</a> &nbsp;·&nbsp; <a href="/app">Analyzer</a> <span class="needs-billing">&nbsp;·&nbsp; <a href="/pricing">Pricing</a></span> &nbsp;·&nbsp; <a href="/privacy">Privacy</a><!--contact-inline--></p>
+    </div>
+  </div>
+</footer>
+
+<script src="/app.js?v=__ASSET_V__" defer></script>
+<script src="/account.js?v=__ASSET_V__" defer></script>
+</body>
+</html>
