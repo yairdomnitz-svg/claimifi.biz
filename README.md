@@ -195,11 +195,19 @@ Passwords need at least 8 characters, plus whatever stricter rules are set in Su
   Supabase and sets the cookies. A failed link arrives with `error_code` in the fragment,
   or in the query when it came through `/auth/confirm`.
 - `/reset-password` — where a reset link ends up, signed in: `POST /api/auth/password`.
+  For its first hour a session opened by an email link may set a password without the
+  current one (Supabase marks it `amr: otp`); any other session sends `current_password`.
 - `/account` — where a confirmation link ends up (`?welcome=1`).
 
 Every `POST` takes JSON, from the site's own origin. Errors carry a string `detail` to
 show as-is, and a `reason` code for the page to branch on (`email_not_confirmed`,
-`invalid_credentials`, `weak_password`, `same_password`, `otp_expired`, …).
+`invalid_credentials`, `weak_password`, `same_password`, `otp_expired`,
+`current_password_required`, `active_subscription`, …).
+
+**Deleting an account** (`POST /api/auth/delete`, `{"password"}`) is refused with `409`
+and `active_subscription` while a Pro plan still renews: it has to be cancelled first, and
+the account page says so in a dialog. A cancelled plan with paid time left doesn't block
+it; deleting the Stripe customer ends that plan at once, with no refund.
 
 ### Payments (Stripe)
 
@@ -264,7 +272,8 @@ Starting a checkout first expires any checkout the customer still has open, so t
 | `POST /api/auth/login` | `{"email", "password"}`; sets the session cookies |
 | `POST /api/auth/logout` | Ends the session in this browser |
 | `POST /api/auth/forgot-password` | `{"email"}`; sends a reset link, with the same reply whether or not the account exists |
-| `POST /api/auth/password` | `{"password"}`; sets a new password for whoever is signed in |
+| `POST /api/auth/password` | `{"password", "current_password"}`; sets a new password for whoever is signed in |
+| `POST /api/auth/delete` | `{"password"}`; deletes the account, once any renewing plan is cancelled |
 | `POST /api/auth/resend` | `{"email"}`; sends the confirmation email again |
 | `POST /api/auth/session`, `GET /auth/confirm` | Turn an email link into a session |
 | `GET /api/billing/status` | Whether payments are on, the prices from Stripe, and the signed-in user's plan |

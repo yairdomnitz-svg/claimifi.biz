@@ -21,19 +21,25 @@ USER = {"id": "user-1", "email": "ada@example.com", "created_at": "2026-09-16T10
 GOOD = {"email": "ada@example.com", "password": "correct horse"}
 
 
-def jwt(exp_in: int = 3600) -> str:
+def jwt(exp_in: int = 3600, amr=None) -> str:
     """An unsigned stand-in shaped like a Supabase access token."""
 
     def segment(obj):
         return base64.urlsafe_b64encode(json.dumps(obj).encode()).rstrip(b"=").decode()
 
-    payload = {"exp": int(time.time()) + exp_in, "sub": USER["id"], "email": USER["email"]}
+    payload = {"exp": int(time.time()) + exp_in, "sub": USER["id"], "email": USER["email"],
+               "amr": amr if amr is not None else [{"method": "password", "timestamp": int(time.time()) - 60}]}
     return f"{segment({'alg': 'ES256'})}.{segment(payload)}.signature"
 
 
-def session(refresh: str = "rt-1", exp_in: int = 3600) -> dict:
+def from_link(ago: int = 60) -> list:
+    """The `amr` claim of a session an email link opened `ago` seconds back."""
+    return [{"method": "otp", "timestamp": int(time.time()) - ago}]
+
+
+def session(refresh: str = "rt-1", exp_in: int = 3600, amr=None) -> dict:
     return {
-        "access_token": jwt(exp_in),
+        "access_token": jwt(exp_in, amr),
         "token_type": "bearer",
         "expires_in": 3600,
         "refresh_token": refresh,
@@ -375,15 +381,47 @@ def test_a_forged_link_session_sets_nothing(auth):
     assert not set_cookies(r.headers)
 
 
-def test_a_new_password_is_set_with_the_visitors_own_token(auth):
+def test_a_reset_links_session_sets_a_new_password_with_the_visitors_own_token(auth):
     _, c, fake = auth()
     fake.on("GET", "/user", body=USER).on("PUT", "/user", body=USER)
-    token = jwt()
+    token = jwt(amr=from_link())
     r = c.post("/api/auth/password", json={"password": "new correct horse"}, headers=sent(token, "rt-1"))
     assert r.json() == {"status": "updated"}
     call = fake.last("PUT", "/user")
     assert call["json"] == {"password": "new correct horse"}
     assert call["headers"]["Authorization"] == f"Bearer {token}"
+    assert not [x for x in fake.calls if x["path"] == "/token"]
+
+
+@pytest.mark.parametrize("token", [jwt(), jwt(amr=from_link(ago=2 * 3600)), jwt(amr=[])],
+                         ids=["password sign-in", "old link", "no amr"])
+def test_any_other_session_needs_the_current_password(auth, token):
+    _, c, fake = auth()
+    fake.on("GET", "/user", body=USER).on("PUT", "/user", body=USER)
+    r = c.post("/api/auth/password", json={"password": "new correct horse"}, headers=sent(token, "rt-1"))
+    assert r.status_code == 400 and r.json()["reason"] == "current_password_required"
+    assert not [x for x in fake.calls if x["method"] == "PUT"]
+
+
+def test_the_current_password_is_checked_before_the_change(auth):
+    _, c, fake = auth()
+    fake.on("GET", "/user", body=USER).on("PUT", "/user", body=USER)
+    fake.on("POST", "/token?password", body=session(refresh="rt-9"))
+    r = c.post("/api/auth/password", json={"password": "new correct horse", "current_password": "correct horse"},
+               headers=sent(jwt(), "rt-1"))
+    assert r.json() == {"status": "updated"}
+    assert fake.last("POST", "/token")["json"] == GOOD
+    assert fake.last("PUT", "/user")["json"] == {"password": "new correct horse"}
+
+
+def test_a_wrong_current_password_changes_nothing(auth):
+    _, c, fake = auth()
+    fake.on("GET", "/user", body=USER).on("PUT", "/user", body=USER)
+    fake.on("POST", "/token?password", status=400, body={"code": "invalid_credentials"})
+    r = c.post("/api/auth/password", json={"password": "new correct horse", "current_password": "nope"},
+               headers=sent(jwt(), "rt-1"))
+    assert r.status_code == 403 and r.json()["reason"] == "invalid_credentials"
+    assert not [x for x in fake.calls if x["method"] == "PUT"]
 
 
 def test_a_new_password_without_a_session_is_refused(auth):
@@ -397,7 +435,7 @@ def test_a_refreshed_session_survives_a_failed_password_change(auth):
     """A refresh token works once. Dropping the renewed pair on an error reply
     would leave the visitor holding a spent token, signed out moments later."""
     _, c, fake = auth()
-    fake.on("POST", "/token?refresh_token", body=session(refresh="rt-2"))
+    fake.on("POST", "/token?refresh_token", body=session(refresh="rt-2", amr=from_link()))
     fake.on("PUT", "/user", status=422, body={"code": "same_password", "msg": "New password should be different."})
     r = c.post("/api/auth/password", json={"password": "same old password"}, headers=sent(jwt(exp_in=-5), "rt-1"))
     assert r.status_code == 422

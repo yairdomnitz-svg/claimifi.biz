@@ -680,6 +680,29 @@ html:not([data-accounts="off"]) .accounts-off-only { display: none !important; }
 .btn-row { display: flex; flex-wrap: wrap; gap: 10px; }
 .btn-row .btn-ghost { flex: 1 1 160px; padding: 12px 18px; font-size: .92rem; }
 .danger-zone h2 { color: var(--bad); }
+.confirm-box .msg { margin-bottom: 0; }
+.reset-by-email { margin-top: 18px; padding-top: 16px; border-top: 1px dashed var(--border); }
+.reset-by-email .btn-ghost { margin-top: 10px; padding: 12px 18px; font-size: .92rem; }
+
+/* ---------------- Account: dialog ---------------- */
+/* A native <dialog> opened with showModal(): it traps focus, closes on Escape
+   and puts the page behind it out of reach. */
+.modal {
+  width: min(440px, calc(100% - 32px)); margin: auto; padding: 0;
+  color: var(--text); background: var(--bg-card);
+  border: 1px solid var(--border); border-radius: var(--r-xl); box-shadow: var(--shadow-lg);
+}
+.modal::backdrop { background: rgba(23, 21, 58, .45); }
+.modal-body { padding: 30px 26px 24px; text-align: center; }
+.modal-icon {
+  width: 56px; height: 56px; margin: 0 auto 16px; display: grid; place-items: center;
+  border-radius: 50%; color: var(--accent); background: var(--accent-soft); border: 1px solid var(--accent-line);
+}
+.modal-icon svg { width: 26px; height: 26px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.modal h2 { font-size: 1.2rem; font-weight: 700; line-height: 1.25; margin-bottom: 8px; }
+.modal p { color: var(--text-2); font-size: .94rem; line-height: 1.55; margin-bottom: 22px; }
+.modal .btn-row { flex-direction: column; }
+.modal .btn-row .btn-ghost { flex: none; width: 100%; }
 
 /* ---------------- Account welcomes and page illustrations ---------------- */
 .page-illustration, .auth-illustration {

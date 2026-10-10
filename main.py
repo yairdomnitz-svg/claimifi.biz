@@ -1962,6 +1962,11 @@ SESSION_MAX_AGE = 30 * 86_400
 # everything past 72.
 PASSWORD_MIN = 8
 PASSWORD_MAX = 72
+# A session opened by an email link this recently may set a password without
+# the current one: opening the link proved the visitor owns the address. Any
+# other session has to give the current password. Reset links themselves last
+# an hour by default.
+LINK_SIGN_IN_FRESH_SECONDS = 3600
 # The link types an email can bring to /auth/confirm.
 EMAIL_LINK_TYPES = frozenset({"email", "signup", "recovery", "invite", "magiclink", "email_change"})
 # Where email links end up, so the account pages have to be served at these
@@ -2209,18 +2214,43 @@ def _clear_session(response: Response, request: Request) -> None:
         response.delete_cookie(name, path="/", secure=secure, httponly=True, samesite="lax")
 
 
-def _token_expiry(token: str) -> float:
-    """When an access token lapses, read from its payload without verifying it.
+def _token_claims(token: str) -> Dict[str, Any]:
+    """An access token's payload, read without verifying it.
 
-    Only ever used to decide whether to refresh first. Whether a token is
-    genuine is Supabase's call, made in _user_for.
+    Whether a token is genuine is Supabase's call, made in _user_for; read a
+    claim to act on only from a token that has been through it.
     """
     try:
         segment = token.split(".")[1]
         claims = json.loads(base64.urlsafe_b64decode(segment + "=" * (-len(segment) % 4)))
-        return float(claims["exp"])
-    except (IndexError, KeyError, TypeError, ValueError, OverflowError):
+    except (IndexError, AttributeError, TypeError, ValueError):
+        return {}
+    return claims if isinstance(claims, dict) else {}
+
+
+def _token_expiry(token: str) -> float:
+    """When an access token lapses. Only ever used to decide whether to refresh first."""
+    try:
+        return float(_token_claims(token)["exp"])
+    except (KeyError, TypeError, ValueError, OverflowError):
         return 0.0
+
+
+def _fresh_link_sign_in(token: str) -> bool:
+    """Whether this session was opened by an email link within the last hour.
+
+    Supabase lists how a session began in the token's `amr` claim, with the
+    time; a reset link, like every email link, begins one with method "otp".
+    The time stays the original sign-in's when the session is refreshed.
+    """
+    now = time.time()
+    for entry in _token_claims(token).get("amr") or []:
+        if not isinstance(entry, dict) or entry.get("method") not in ("otp", "recovery", "magiclink"):
+            continue
+        at = entry.get("timestamp")
+        if isinstance(at, (int, float)) and 0 <= now - at <= LINK_SIGN_IN_FRESH_SECONDS:
+            return True
+    return False
 
 
 def _token_key(token: str) -> str:
@@ -2348,6 +2378,8 @@ class EmailBody(BaseModel):
 
 class PasswordBody(BaseModel):
     password: str = Field(max_length=1024)
+    # Needed unless the session came from an email link moments ago.
+    current_password: str = Field(default="", max_length=1024)
 
 
 class LinkSessionBody(BaseModel):
@@ -2440,9 +2472,30 @@ async def auth_forgot_password(req: EmailBody, request: Request):
     return JSONResponse({"status": "sent"}, headers=NO_STORE)
 
 
+async def _check_password(request: Request, user: Dict[str, Any], password: str, wrong: str) -> None:
+    """Refuse unless `password` is the user's own, by signing in with it afresh."""
+    try:
+        await _auth_call(
+            request,
+            "POST",
+            "/token",
+            params={"grant_type": "password"},
+            body={"email": user.get("email") or "", "password": password},
+        )
+    except AuthError as exc:
+        if exc.reason == "invalid_credentials":
+            raise AuthError(403, wrong, reason="invalid_credentials") from exc
+        raise
+
+
 @app.post("/api/auth/password")
 async def auth_change_password(req: PasswordBody, request: Request):
-    """Set a new password for whoever is signed in, including the session a reset link opened."""
+    """Set a new password for whoever is signed in.
+
+    The current password is asked for, so a session left open on a shared
+    computer is not enough to take the account over. A reset link's session
+    is let off for its first hour: the link already proved who is asking.
+    """
     _require_auth(request)
     password = _password(req.password)
     session = await _current_session(request)
@@ -2452,6 +2505,12 @@ async def auth_change_password(req: PasswordBody, request: Request):
         )
         return _with_session(_error_json(signed_out), request, session)
     try:
+        if not _fresh_link_sign_in(session.token):
+            if not req.current_password:
+                raise AuthError(400, "Enter your current password.", reason="current_password_required")
+            await _check_password(
+                request, session.user, req.current_password, "Your current password isn't right."
+            )
         await _auth_call(request, "PUT", "/user", body={"password": password}, token=session.token)
     except AuthError as exc:
         return _with_session(_error_json(exc), request, session)
@@ -2523,6 +2582,11 @@ async def auth_change_email(req: EmailBody, request: Request):
     )
 
 
+def _renews(user: Optional[Dict[str, Any]]) -> bool:
+    """A paid plan that will charge again: Pro, and not already cancelled."""
+    return _plan_for(user) == PLAN_NAME and not _billing(user).get("cancel_at_period_end")
+
+
 async def _close_billing_for_deletion(user: Dict[str, Any]) -> None:
     """Stop all billing before an account is erased.
 
@@ -2561,7 +2625,9 @@ async def auth_delete_account(req: DeleteAccountBody, request: Request):
     """Erase the signed-in account: subscription, Stripe customer and Supabase user.
 
     The password is asked for again, so a session left open on a shared
-    computer is not enough to delete someone's account.
+    computer is not enough to delete someone's account. A subscription that
+    still renews has to be cancelled first: the account page says so in a
+    dialog, and this refuses it too, so the rule holds without the page.
     """
     _require_auth(request)
     session = await _current_session(request)
@@ -2569,20 +2635,15 @@ async def auth_delete_account(req: DeleteAccountBody, request: Request):
         user = session.user
         if not user or not session.token:
             raise _signed_out_error()
+        if _renews(user):
+            raise AuthError(
+                409,
+                "Cancel your Pro subscription before deleting your account.",
+                reason="active_subscription",
+            )
         if not req.password:
             raise AuthError(400, "Enter your password to confirm.", reason="validation_failed")
-        try:
-            await _auth_call(
-                request,
-                "POST",
-                "/token",
-                params={"grant_type": "password"},
-                body={"email": user.get("email") or "", "password": req.password},
-            )
-        except AuthError as exc:
-            if exc.reason == "invalid_credentials":
-                raise AuthError(403, "That password isn't right.", reason="invalid_credentials") from exc
-            raise
+        await _check_password(request, user, req.password, "That password isn't right.")
         await _close_billing_for_deletion(user)
         await _auth_call(request, "DELETE", f"/admin/users/{user['id']}")
     except AuthError as exc:
