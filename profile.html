@@ -5,8 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#ffffff">
 
-<title>Your account | Claimifi.biz</title>
-<meta name="description" content="Sign in to Claimifi.biz to manage your plan.">
+<title>Your profile | Claimifi.biz</title>
+<meta name="description" content="Your Claimifi.biz profile, plan and password.">
 <meta name="robots" content="noindex, follow">
 
 <link rel="icon" href="/favicon.svg?v=__ASSET_V__" type="image/svg+xml">
@@ -17,7 +17,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Lato:ital,wght@0,400;0,700;1,700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/styles.css?v=__ASSET_V__">
 </head>
-<body data-page="account">
+<body data-page="profile">
 
 <a href="#main" class="skip">Skip to content</a>
 
@@ -35,7 +35,7 @@
     <div class="nav-right">
       <span class="status" id="status" role="status"><span class="dot" aria-hidden="true"></span><span id="statusText">Checking…</span></span>
       <span class="plan-badge" id="navPlan" hidden>Pro</span>
-      <a class="nav-account needs-accounts" id="navAccount" href="/account">Sign in</a>
+      <a class="nav-account needs-accounts" id="navAccount" href="/login">Sign in</a>
     </div>
   </div>
 </header>
@@ -43,7 +43,7 @@
 <main id="main" tabindex="-1">
   <div class="wrap">
     <div class="page-head">
-      <h1>Your account</h1>
+      <h1>Your profile</h1>
     </div>
 
     <div class="auth-card accounts-off-only">
@@ -51,59 +51,9 @@
       <p>The analyzer works without one. <a href="/app">Open the analyzer</a>.</p>
     </div>
 
-    <div class="auth-card needs-accounts" id="accountCard">
+    <div class="auth-card wide needs-accounts" id="accountCard">
       <p class="msg" id="accountMsg" role="status"></p>
-
-      <div id="signedOut" hidden>
-        <div class="auth-illustration" id="signedOutIllustration" aria-hidden="true">
-          <svg viewBox="0 0 180 116" aria-hidden="true">
-            <defs><linearGradient id="authGrad" x1="42" y1="18" x2="136" y2="101" gradientUnits="userSpaceOnUse"><stop stop-color="#A461F6"/><stop offset="1" stop-color="#7887F2"/></linearGradient></defs>
-            <path d="M44 35c0-8 6-14 14-14h63c8 0 15 6 15 14v52c0 8-7 14-15 14H58c-8 0-14-6-14-14V35Z" fill="#fff" stroke="var(--border-strong)" stroke-width="3"/>
-            <path d="m48 37 36 28c4 3 8 3 12 0l36-28" fill="none" stroke="var(--accent)" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
-            <circle cx="137" cy="83" r="20" fill="url(#authGrad)"/>
-            <path d="m128 83 6 6 12-14" fill="none" stroke="#fff" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
-            <circle cx="34" cy="63" r="4" fill="#B4D5F8"/><circle cx="146" cy="44" r="4" fill="#B4D5F8"/><circle cx="38" cy="81" r="3" fill="#B4D5F8"/><circle cx="142" cy="21" r="3" fill="#B4D5F8"/>
-          </svg>
-        </div>
-        <div class="auth-illustration auth-illustration-deleted" id="deletedIllustration" aria-hidden="true" hidden>
-          <svg viewBox="0 0 180 116" aria-hidden="true">
-            <defs><linearGradient id="deletedGrad" x1="53" y1="25" x2="127" y2="98" gradientUnits="userSpaceOnUse"><stop stop-color="#A461F6"/><stop offset="1" stop-color="#7887F2"/></linearGradient></defs>
-            <path d="M51 40h78l-7 57H58l-7-57Z" fill="#fff" stroke="var(--border-strong)" stroke-width="3" stroke-linejoin="round"/>
-            <path d="M45 40h90l-9-16H54l-9 16Z" fill="var(--accent-soft)" stroke="var(--border-strong)" stroke-width="3" stroke-linejoin="round"/>
-            <rect x="76" y="58" width="28" height="6" rx="3" fill="url(#deletedGrad)"/>
-            <circle cx="32" cy="91" r="5" fill="#B4D5F8"/><circle cx="148" cy="91" r="5" fill="#B4D5F8"/>
-          </svg>
-        </div>
-        <div class="tabs" role="tablist" aria-label="Sign in or create an account">
-          <button type="button" role="tab" id="tabLogin" aria-selected="true" aria-controls="loginForm">Log in</button>
-          <button type="button" role="tab" id="tabSignup" aria-selected="false" aria-controls="signupForm">Create account</button>
-        </div>
-
-        <form class="form" id="loginForm" role="tabpanel" aria-labelledby="tabLogin" novalidate>
-          <div class="form-field"><label for="loginEmail">Email</label><input type="email" id="loginEmail" autocomplete="email" required></div>
-          <div class="form-field"><label for="loginPassword">Password</label><input type="password" id="loginPassword" autocomplete="current-password" required></div>
-          <button class="btn" type="submit">Log in</button>
-          <button class="link-btn" type="button" id="showForgot">Forgot your password?</button>
-          <button class="link-btn" type="button" id="resendBtn" hidden>Send the confirmation email again</button>
-        </form>
-
-        <form class="form" id="signupForm" role="tabpanel" aria-labelledby="tabSignup" hidden novalidate>
-          <div class="form-field"><label for="signupEmail">Email</label><input type="email" id="signupEmail" autocomplete="email" required></div>
-          <div class="form-field">
-            <label for="signupPassword">Password</label>
-            <input type="password" id="signupPassword" autocomplete="new-password" minlength="8" required aria-describedby="signupHelp">
-            <p class="form-help" id="signupHelp">At least 8 characters.</p>
-          </div>
-          <button class="btn" type="submit">Create account</button>
-        </form>
-
-        <form class="form" id="forgotForm" hidden novalidate>
-          <p class="muted">Enter your email and we'll send a link to set a new password.</p>
-          <div class="form-field"><label for="forgotEmail">Email</label><input type="email" id="forgotEmail" autocomplete="email" required></div>
-          <button class="btn" type="submit">Send reset link</button>
-          <button class="link-btn" type="button" id="backToLogin">Back to log in</button>
-        </form>
-      </div>
+      <p class="muted" id="profileLoading">Loading your profile…</p>
 
       <div id="signedIn" hidden>
         <section class="welcome-card welcome-card-pro" id="proWelcome" aria-labelledby="proWelcomeTitle" hidden>
@@ -164,7 +114,7 @@
         </section>
 
         <section class="acct-section" aria-labelledby="profileH">
-          <h2 id="profileH" tabindex="-1">Profile</h2>
+          <h2 id="profileH" tabindex="-1">Your details</h2>
           <dl class="kv">
             <dt>Name</dt><dd id="acctName">—</dd>
             <dt>Email</dt><dd id="acctEmail"></dd>

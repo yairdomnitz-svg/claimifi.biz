@@ -12,7 +12,8 @@ main.py                FastAPI backend; serves the pages and the API
 index.html             Landing page (/)
 app.html               Analyzer (/app)
 pricing.html           Free vs Pro, with the Subscribe button (/pricing)
-account.html           Sign up, log in, plan and billing (/account)
+login.html             Log in, sign up, forgot password (/login)
+profile.html           Profile, plan, password, delete account (/profile)
 callback.html          Where email links land (/auth/callback)
 reset-password.html    New password after a reset link (/reset-password)
 privacy.html           Privacy notice (/privacy)
@@ -160,7 +161,7 @@ confirmation, log in and out, and password reset, through Supabase Auth. This se
 makes every call to Supabase and keeps the session in HttpOnly cookies, so the browser
 never sees a token. Until both variables are set every `/api/auth` route answers `503`
 with `"reason": "auth_unavailable"`, `/auth/confirm` answers `404`, the Sign in links stay
-hidden, and `/account` says accounts aren't available yet.
+hidden, and `/login` and `/profile` say accounts aren't available yet.
 
 To connect Supabase:
 
@@ -197,7 +198,9 @@ Passwords need at least 8 characters, plus whatever stricter rules are set in Su
 - `/reset-password` — where a reset link ends up, signed in: `POST /api/auth/password`.
   For its first hour a session opened by an email link may set a password without the
   current one (Supabase marks it `amr: otp`); any other session sends `current_password`.
-- `/account` — where a confirmation link ends up (`?welcome=1`).
+- `/profile` — where a confirmation link ends up (`?welcome=1`). Signed out, it sends the
+  visitor to `/login?next=…` and back. `/login` sends a signed-in visitor on to `/profile`.
+- `/account` — the old single account page; it redirects (308) to `/profile`, keeping the query.
 
 Every `POST` takes JSON, from the site's own origin. Errors carry a string `detail` to
 show as-is, and a `reason` code for the page to branch on (`email_not_confirmed`,
@@ -251,7 +254,7 @@ To connect Stripe:
    `GET /health` should report `billing_configured: true`.
 
 Locally, run `stripe listen --forward-to localhost:8000/api/stripe/webhook` and use the
-`whsec_...` it prints. Checkout comes back to `/account?checkout=success`, and a cancelled
+`whsec_...` it prints. Checkout comes back to `/profile?checkout=success`, and a cancelled
 checkout to `/pricing?checkout=cancelled`.
 
 Starting a checkout first expires any checkout the customer still has open, so two tabs
@@ -263,7 +266,7 @@ Starting a checkout first expires any checkout the customer still has open, so t
 | --- | --- |
 | `GET /` | Landing page |
 | `GET /app` | Analyzer; accepts `?q=` to prefill the input |
-| `GET /pricing`, `/account`, `/auth/callback`, `/reset-password`, `/privacy` | Plans, account, email-link landing, new password, privacy |
+| `GET /pricing`, `/login`, `/profile`, `/auth/callback`, `/reset-password`, `/privacy` | Plans, log in, profile, email-link landing, new password, privacy |
 | `GET /health` | Liveness + configuration status |
 | `GET /api/config` | Tells the frontend whether live analysis is available |
 | `POST /api/analyze` | `{"url": "..."}` (max 2000 chars) or `{"title": "..."}` (3–300 chars) |

@@ -460,7 +460,7 @@ def test_a_signup_link_opens_the_account_page(auth):
     _, c, fake = auth()
     fake.on("POST", "/verify", body=session())
     r = c.get("/auth/confirm?token_hash=abc123&type=email", follow_redirects=False)
-    assert r.headers["location"] == "/account?welcome=1"
+    assert r.headers["location"] == "/profile?welcome=1"
 
 
 @pytest.mark.parametrize(
@@ -475,7 +475,7 @@ def test_confirm_never_redirects_off_the_site(auth, next_value):
         params={"token_hash": "abc", "type": "email", "next": next_value},
         follow_redirects=False,
     )
-    assert r.headers["location"] == "/account?welcome=1"
+    assert r.headers["location"] == "/profile?welcome=1"
 
 
 def test_confirm_follows_a_same_site_next(auth):

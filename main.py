@@ -1974,7 +1974,11 @@ EMAIL_LINK_TYPES = frozenset({"email", "signup", "recovery", "invite", "magiclin
 # the URL fragment, for that page to hand to POST /api/auth/session.
 AUTH_CALLBACK_PATH = "/auth/callback"
 AUTH_RESET_PATH = "/reset-password"
-AUTH_ACCOUNT_PATH = "/account"
+AUTH_ACCOUNT_PATH = "/profile"
+AUTH_LOGIN_PATH = "/login"
+# The single account page these two replaced. Old bookmarks, emails already
+# sent and a Customer Portal still set to return here are sent on to /profile.
+LEGACY_ACCOUNT_PATH = "/account"
 NO_STORE = {"Cache-Control": "no-store"}
 
 # Supabase's answer to "whose token is this", kept for up to a minute per token,
@@ -2557,7 +2561,7 @@ async def auth_update_profile(req: ProfileBody, request: Request):
 async def auth_change_email(req: EmailBody, request: Request):
     """Start an email change. Supabase mails a confirmation link (to both
     addresses when its secure email change is on); the address changes only once
-    it is opened, and the link lands on /account through /auth/confirm."""
+    it is opened, and the link lands on /profile through /auth/confirm."""
     _require_auth(request)
     email = _email(req.email)
     session = await _current_session(request)
@@ -3209,7 +3213,8 @@ PAGES = {
     "/": "index.html",
     "/app": "app.html",
     PRICING_PATH: "pricing.html",
-    AUTH_ACCOUNT_PATH: "account.html",
+    AUTH_LOGIN_PATH: "login.html",
+    AUTH_ACCOUNT_PATH: "profile.html",
     AUTH_CALLBACK_PATH: "callback.html",
     AUTH_RESET_PATH: "reset-password.html",
     "/privacy": "privacy.html",
@@ -3225,6 +3230,13 @@ def _page_route(name: str):
 
 for _path, _name in PAGES.items():
     app.add_api_route(_path, _page_route(_name), methods=PAGE_METHODS, include_in_schema=False)
+
+
+@app.api_route(LEGACY_ACCOUNT_PATH, methods=PAGE_METHODS, include_in_schema=False)
+async def legacy_account(request: Request):
+    # The query goes along: ?checkout=success, ?welcome=1 and the rest still apply.
+    query = request.url.query
+    return RedirectResponse(AUTH_ACCOUNT_PATH + (f"?{query}" if query else ""), status_code=308)
 
 
 # Files served verbatim from the repo root, mapped to their content type. Anything
@@ -3325,6 +3337,8 @@ async def robots():
         "Disallow: /api/\n"
         "Disallow: /health\n"
         "Disallow: /account\n"
+        "Disallow: /login\n"
+        "Disallow: /profile\n"
         "Disallow: /auth/\n"
         "Disallow: /reset-password\n"
         "\n"

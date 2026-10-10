@@ -1,4 +1,4 @@
-/* Claimifi.biz — pricing, account, email-link and password-reset pages.
+/* Claimifi.biz — pricing, log-in, profile, email-link and password-reset pages.
    Every call goes to this site's own /api; the browser never talks to Supabase
    or Stripe and never holds a token (the session lives in HttpOnly cookies). */
 (function () {
@@ -134,9 +134,9 @@
     yearlyBtn.addEventListener('click', function () { interval = 'yearly'; render(); });
 
     subscribe.addEventListener('click', function () {
-      if (status && status.plan === 'pro') { window.location.href = '/account'; return; }
+      if (status && status.plan === 'pro') { window.location.href = '/profile'; return; }
       if (status && !status.signed_in) {
-        window.location.href = '/account?next=' + encodeURIComponent('/pricing?interval=' + interval);
+        window.location.href = '/login?next=' + encodeURIComponent('/pricing?interval=' + interval);
         return;
       }
       busy(subscribe, true);
@@ -145,7 +145,7 @@
         if (r.ok && r.data.url) { window.location.href = r.data.url; return; }
         busy(subscribe, false);
         if (r.data.reason === 'signed_out') {
-          window.location.href = '/account?next=' + encodeURIComponent('/pricing?interval=' + interval);
+          window.location.href = '/login?next=' + encodeURIComponent('/pricing?interval=' + interval);
           return;
         }
         if (r.data.reason === 'already_subscribed') {
@@ -164,21 +164,17 @@
     });
   }
 
-  /* ---------------- Account ---------------- */
+  /* ---------------- Log in, sign up, forgot password ---------------- */
 
-  function accountPage() {
+  function loginPage() {
     if (!ACCOUNTS_ON) return;
     var msg = $('accountMsg');
     var q = params();
     var next = safeNext(q.get('next'));
 
-    if (q.get('checkout') === 'success') say(msg, 'ok', 'Thank you! Your payment went through. Pro switches on within a few seconds.');
     if (q.get('deleted') === '1') say(msg, 'ok', 'Your account has been deleted, and any subscription cancelled. Thank you for using Claimifi.biz.');
-    if (q.get('email_changed') === '1') say(msg, 'ok', 'Your email address has been changed.');
     var linkError = q.get('error_code');
     if (linkError) say(msg, 'err', linkMessage(linkError));
-
-    /* ----- signed out ----- */
 
     var tabLogin = $('tabLogin'), tabSignup = $('tabSignup');
     var loginForm = $('loginForm'), signupForm = $('signupForm'), forgotForm = $('forgotForm');
@@ -189,6 +185,7 @@
     }
 
     function show(which) {
+      $('loginTitle').textContent = which === 'signup' ? 'Create your free account' : which === 'forgot' ? 'Reset your password' : 'Log in to Claimifi.biz';
       loginForm.hidden = which !== 'login';
       signupForm.hidden = which !== 'signup';
       forgotForm.hidden = which !== 'forgot';
@@ -206,7 +203,7 @@
     $('backToLogin').addEventListener('click', function () { show('login'); });
 
     function afterSignIn(isNewAccount) {
-      window.location.href = next || (isNewAccount ? '/account?welcome=1' : '/account');
+      window.location.href = next || (isNewAccount ? '/profile?welcome=1' : '/profile');
     }
 
     loginForm.addEventListener('submit', function (e) {
@@ -264,7 +261,31 @@
       });
     });
 
-    /* ----- signed in ----- */
+    request('GET', '/api/auth/me').then(function (r) {
+      // Signed in already: carry on to wherever this visitor was going.
+      if (r.ok && r.data.user) { window.location.replace(next || '/profile'); return; }
+      $('signedOut').hidden = false;
+      if (!r.ok) { say(msg, 'err', errorText(r)); return; }
+      if (q.get('welcome') === '1') {
+        say(msg, 'ok', 'Your email is confirmed. Log in to open your account.');
+      }
+      if (next && next.indexOf('/pricing') === 0 && !msg.textContent) {
+        say(msg, 'info', 'Log in or create an account to subscribe to Pro.');
+      }
+      if (window.location.hash === '#forgot') show('forgot');
+      else if (window.location.hash === '#signup') show('signup');
+    });
+  }
+
+  /* ---------------- Profile ---------------- */
+
+  function profilePage() {
+    if (!ACCOUNTS_ON) { $('profileLoading').hidden = true; return; }
+    var msg = $('accountMsg');
+    var q = params();
+
+    if (q.get('checkout') === 'success') say(msg, 'ok', 'Thank you! Your payment went through. Pro switches on within a few seconds.');
+    if (q.get('email_changed') === '1') say(msg, 'ok', 'Your email address has been changed.');
 
     // Messages scroll into view: on a long account page the result of a click
     // near the bottom would otherwise appear off-screen at the top.
@@ -595,35 +616,29 @@
           return;
         }
         if (!r.ok) { notify('err', errorText(r)); return; }
-        window.location.href = '/account?deleted=1';
+        window.location.href = '/login?deleted=1';
       });
     });
 
     request('GET', '/api/auth/me').then(function (r) {
+      $('profileLoading').hidden = true;
       if (!r.ok) { say(msg, 'err', errorText(r)); return; }
       var user = r.data.user;
-      if (user) {
-        // Signed in already, and sent here on the way somewhere: carry on.
-        if (next) { window.location.href = next; return; }
-        $('accountCard').classList.add('wide');
-        $('signedIn').hidden = false;
-        accountTag = tagFor(user.email);
-        accountEmail = user.email || '';
-        renderProfile(user);
-        if (q.get('welcome') === '1') {
-          showWelcome('newAccountWelcome', 'newAccountWelcomeTitle', 'claimifi-welcome-seen');
-        }
-        loadPlan(0);
-      } else {
-        $('signedOut').hidden = false;
-        if (q.get('welcome') === '1') {
-          say(msg, 'ok', 'Your email is confirmed. Log in to open your account.');
-        }
-        if (next && next.indexOf('/pricing') === 0 && !msg.textContent) {
-          say(msg, 'info', 'Log in or create an account to subscribe to Pro.');
-        }
-        if (window.location.hash === '#forgot') show('forgot');
+      if (!user) {
+        // Signed out: log in first, then come back here with the same query.
+        var back = window.location.pathname + window.location.search;
+        window.location.replace(q.get('welcome') === '1' ? '/login?welcome=1'
+          : window.location.search ? '/login?next=' + encodeURIComponent(back) : '/login');
+        return;
       }
+      $('signedIn').hidden = false;
+      accountTag = tagFor(user.email);
+      accountEmail = user.email || '';
+      renderProfile(user);
+      if (q.get('welcome') === '1') {
+        showWelcome('newAccountWelcome', 'newAccountWelcomeTitle', 'claimifi-welcome-seen');
+      }
+      loadPlan(0);
     });
   }
 
@@ -671,8 +686,8 @@
       }
       window.location.replace(
         hash.type === 'recovery' ? '/reset-password'
-          : hash.type === 'email_change' ? '/account?email_changed=1'
-          : '/account?welcome=1');
+          : hash.type === 'email_change' ? '/profile?email_changed=1'
+          : '/profile?welcome=1');
     });
   }
 
@@ -697,13 +712,13 @@
         busy(button, false);
         if (r.ok) {
           form.hidden = true;
-          say(msg, 'ok', 'Your new password is saved. Taking you to your account…');
-          setTimeout(function () { window.location.href = '/account'; }, 1500);
+          say(msg, 'ok', 'Your new password is saved. Taking you to your profile…');
+          setTimeout(function () { window.location.href = '/profile'; }, 1500);
           return;
         }
         // An hour after the link was opened, the session needs the old password like any other.
         if (r.data.reason === 'signed_out' || r.data.reason === 'current_password_required') {
-          say(msg, 'err', 'This reset link has expired. Request a new one from the account page.');
+          say(msg, 'err', 'This reset link has expired. Request a new one from the log-in page.');
           return;
         }
         say(msg, 'err', errorText(r));
@@ -712,7 +727,8 @@
   }
 
   if (page === 'pricing') pricingPage();
-  else if (page === 'account') accountPage();
+  else if (page === 'login') loginPage();
+  else if (page === 'profile') profilePage();
   else if (page === 'callback') callbackPage();
   else if (page === 'reset') resetPage();
 })();

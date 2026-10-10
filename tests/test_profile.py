@@ -102,7 +102,7 @@ def test_an_email_change_link_lands_on_the_account_page(acct):
     supa.on("POST", "/verify", body={"access_token": jwt(), "refresh_token": "rt-9", "expires_in": 3600, "user": user()})
     r = c.get("/auth/confirm?token_hash=abc&type=email_change", follow_redirects=False)
     assert r.status_code == 303
-    assert r.headers["location"] == "/account?email_changed=1"
+    assert r.headers["location"] == "/profile?email_changed=1"
 
 
 # --------------------------------------------------------------------------

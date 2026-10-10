@@ -17,7 +17,7 @@ APP_JS = (REPO / "app.js").read_text(encoding="utf-8")
 APP_HTML = (REPO / "app.html").read_text(encoding="utf-8")
 INDEX_HTML = (REPO / "index.html").read_text(encoding="utf-8")
 STYLES = (REPO / "styles.css").read_text(encoding="utf-8")
-ACCOUNT_HTML = (REPO / "account.html").read_text(encoding="utf-8")
+PROFILE_HTML = (REPO / "profile.html").read_text(encoding="utf-8")
 ACCOUNT_JS = (REPO / "account.js").read_text(encoding="utf-8")
 
 
@@ -253,16 +253,16 @@ def test_the_copied_report_carries_the_title_only_caveat():
 
 
 # --------------------------------------------------------------------------
-# Account page
+# Profile page
 # --------------------------------------------------------------------------
 def test_deleting_with_a_renewing_plan_opens_the_reminder_dialog():
     """Both ways in: the page's own copy of the plan, and the server's 409 when
     that copy was out of date."""
-    assert '<dialog class="modal" id="subBlock"' in ACCOUNT_HTML
+    assert '<dialog class="modal" id="subBlock"' in PROFILE_HTML
     assert "if (renews(plan)) { openSubBlock(); return; }" in ACCOUNT_JS
     assert "r.data.reason === 'active_subscription'" in ACCOUNT_JS
 
 
 def test_the_signed_in_password_change_sends_the_current_password():
-    assert 'id="currentPassword"' in ACCOUNT_HTML
+    assert 'id="currentPassword"' in PROFILE_HTML
     assert "current_password: current" in ACCOUNT_JS
