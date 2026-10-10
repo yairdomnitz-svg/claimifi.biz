@@ -227,7 +227,7 @@ def test_first_checkout_creates_one_customer_and_a_session(billing):
     assert data["line_items[0][price]"] == "price_y"
     assert data["client_reference_id"] == USER_ID
     assert data["subscription_data[metadata][user_id]"] == USER_ID
-    assert data["success_url"] == "https://claimifi.biz/account?checkout=success"
+    assert data["success_url"] == "https://claimifi.biz/profile?checkout=success"
     assert data["cancel_url"] == "https://claimifi.biz/pricing?checkout=cancelled"
 
 
@@ -340,7 +340,7 @@ def test_portal_opens_for_the_users_own_customer(billing):
     r = c.post("/api/billing/portal", headers=signed_in())
     assert r.json() == {"url": "https://billing.stripe.com/p/session/x"}
     data = stripe.last("POST", "/billing_portal/sessions")["data"]
-    assert data == {"customer": "cus_1", "return_url": "https://claimifi.biz/account"}
+    assert data == {"customer": "cus_1", "return_url": "https://claimifi.biz/profile"}
 
 
 # --------------------------------------------------------------------------

@@ -288,7 +288,7 @@ def test_head_is_answered(client, path):
 # --------------------------------------------------------------------------
 # BUG-007 / BUG-008 / BUG-017: pages, contact, SITE_URL
 # --------------------------------------------------------------------------
-@pytest.mark.parametrize("path", ["/pricing", "/account", "/auth/callback", "/reset-password", "/privacy"])
+@pytest.mark.parametrize("path", ["/pricing", "/login", "/profile", "/auth/callback", "/reset-password", "/privacy"])
 def test_the_account_and_billing_destinations_exist(client, path):
     _, c = client()
     r = c.get(path)
@@ -323,8 +323,28 @@ def test_sitemap_lists_privacy_and_robots_hides_account_pages(client):
     assert "/privacy</loc>" in c.get("/sitemap.xml").text
     assert "/pricing</loc>" not in c.get("/sitemap.xml").text  # nothing to sell yet
     robots = c.get("/robots.txt").text
-    for path in ("/account", "/auth/", "/reset-password"):
+    for path in ("/account", "/login", "/profile", "/auth/", "/reset-password"):
         assert f"Disallow: {path}" in robots
+
+
+@pytest.mark.parametrize(
+    ("path", "target"),
+    [("/account", "/profile"), ("/account?checkout=success", "/profile?checkout=success")],
+)
+def test_the_old_account_page_sends_visitors_on_to_the_profile(client, path, target):
+    _, c = client()
+    r = c.get(path, follow_redirects=False)
+    assert r.status_code == 308
+    assert r.headers["location"] == target
+
+
+def test_login_and_profile_are_separate_pages(client):
+    _, c = client()
+    login, profile = c.get("/login").text, c.get("/profile").text
+    assert 'data-page="login"' in login and 'id="loginForm"' in login and 'id="signedIn"' not in login
+    assert 'data-page="profile"' in profile and 'id="signedIn"' in profile and 'id="loginForm"' not in profile
+    for page in (c.get("/").text, login, profile):
+        assert 'href="/account"' not in page
 
 
 # --------------------------------------------------------------------------

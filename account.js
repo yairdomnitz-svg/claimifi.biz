@@ -1,4 +1,4 @@
-/* Claimifi.biz — pricing, account, email-link and password-reset pages.
+/* Claimifi.biz — pricing, log-in, profile, email-link and password-reset pages.
    Every call goes to this site's own /api; the browser never talks to Supabase
    or Stripe and never holds a token (the session lives in HttpOnly cookies). */
 (function () {
@@ -141,9 +141,9 @@
     yearlyBtn.addEventListener('click', function () { interval = 'yearly'; render(); });
 
     subscribe.addEventListener('click', function () {
-      if (status && status.plan === 'pro') { window.location.href = '/account'; return; }
+      if (status && status.plan === 'pro') { window.location.href = '/profile'; return; }
       if (status && !status.signed_in) {
-        window.location.href = '/account?next=' + encodeURIComponent('/pricing?interval=' + interval);
+        window.location.href = '/login?next=' + encodeURIComponent('/pricing?interval=' + interval);
         return;
       }
       busy(subscribe, true);
@@ -152,7 +152,7 @@
         if (r.ok && r.data.url) { window.location.href = r.data.url; return; }
         busy(subscribe, false);
         if (r.data.reason === 'signed_out') {
-          window.location.href = '/account?next=' + encodeURIComponent('/pricing?interval=' + interval);
+          window.location.href = '/login?next=' + encodeURIComponent('/pricing?interval=' + interval);
           return;
         }
         if (r.data.reason === 'already_subscribed') {
@@ -171,21 +171,17 @@
     });
   }
 
-  /* ---------------- Account ---------------- */
+  /* ---------------- Log in, sign up, forgot password ---------------- */
 
-  function accountPage() {
+  function loginPage() {
     if (!ACCOUNTS_ON) return;
     var msg = $('accountMsg');
     var q = params();
     var next = safeNext(q.get('next'));
 
-    if (q.get('checkout') === 'success') say(msg, 'ok', 'Thank you! Your payment went through. Pro switches on within a few seconds.');
     if (q.get('deleted') === '1') say(msg, 'ok', 'Your account has been deleted, and any subscription cancelled. Thank you for using Claimifi.biz.');
-    if (q.get('email_changed') === '1') say(msg, 'ok', 'Your email address has been changed.');
     var linkError = q.get('error_code');
     if (linkError) say(msg, 'err', linkMessage(linkError));
-
-    /* ----- signed out ----- */
 
     var tabLogin = $('tabLogin'), tabSignup = $('tabSignup');
     var loginForm = $('loginForm'), signupForm = $('signupForm'), forgotForm = $('forgotForm');
@@ -196,6 +192,7 @@
     }
 
     function show(which) {
+      $('loginTitle').textContent = which === 'signup' ? 'Create your free account' : which === 'forgot' ? 'Reset your password' : 'Log in to Claimifi.biz';
       loginForm.hidden = which !== 'login';
       signupForm.hidden = which !== 'signup';
       forgotForm.hidden = which !== 'forgot';
@@ -213,7 +210,7 @@
     $('backToLogin').addEventListener('click', function () { show('login'); });
 
     function afterSignIn(isNewAccount) {
-      window.location.href = next || (isNewAccount ? '/account?welcome=1' : '/account');
+      window.location.href = next || (isNewAccount ? '/profile?welcome=1' : '/profile');
     }
 
     loginForm.addEventListener('submit', function (e) {
@@ -271,7 +268,31 @@
       });
     });
 
-    /* ----- signed in ----- */
+    request('GET', '/api/auth/me').then(function (r) {
+      // Signed in already: carry on to wherever this visitor was going.
+      if (r.ok && r.data.user) { window.location.replace(next || '/profile'); return; }
+      $('signedOut').hidden = false;
+      if (!r.ok) { say(msg, 'err', errorText(r)); return; }
+      if (q.get('welcome') === '1') {
+        say(msg, 'ok', 'Your email is confirmed. Log in to open your account.');
+      }
+      if (next && next.indexOf('/pricing') === 0 && !msg.textContent) {
+        say(msg, 'info', 'Log in or create an account to subscribe to Pro.');
+      }
+      if (window.location.hash === '#forgot') show('forgot');
+      else if (window.location.hash === '#signup') show('signup');
+    });
+  }
+
+  /* ---------------- Profile ---------------- */
+
+  function profilePage() {
+    if (!ACCOUNTS_ON) { $('profileLoading').hidden = true; return; }
+    var msg = $('accountMsg');
+    var q = params();
+
+    if (q.get('checkout') === 'success') say(msg, 'ok', 'Thank you! Your payment went through. Pro switches on within a few seconds.');
+    if (q.get('email_changed') === '1') say(msg, 'ok', 'Your email address has been changed.');
 
     // Messages scroll into view: on a long account page the result of a click
     // near the bottom would otherwise appear off-screen at the top.
@@ -295,6 +316,14 @@
     }
 
     var plan = null;
+    var accountEmail = '';
+    var cancelForDelete = false;  // the cancel was started from the delete dialog
+
+    // Pro that will charge again. A cancelled plan with paid time left doesn't
+    // count: the account can go, and takes the rest of that time with it.
+    function renews(b) {
+      return !!b && b.plan === 'pro' && !b.cancel_at_period_end;
+    }
 
     // Welcomes are remembered per account, not per browser: with one shared key,
     // a second person subscribing on the same computer never saw theirs. The
@@ -382,6 +411,13 @@
       // Upgrade is the way back to Pro.
       $('portalBtn').hidden = !(isPro || b.status);
       $('portalBtn').textContent = isPro ? 'Change plan, card or see invoices' : 'See past invoices';
+      var note = $('deleteProNote');
+      note.hidden = !ending;
+      if (ending) {
+        note.textContent = 'You still have Pro until ' + (when || 'the end of this period') +
+          ". Deleting your account ends it now, and the time left isn't refunded.";
+      }
+      if (renews(b) && !$('deleteForm').hidden) closeDeleteForm(false);
     }
 
     function loadPlan(attempt) {
@@ -451,6 +487,7 @@
       $('cancelNo').focus();
     });
     $('cancelNo').addEventListener('click', function () {
+      cancelForDelete = false;
       $('cancelConfirm').hidden = true;
       $('cancelBtn').focus();
     });
@@ -461,7 +498,9 @@
         busy(button, false);
         if (!r.ok) { notify('err', errorText(r)); return; }
         renderPlan(r.data);
-        notify('ok', 'Your subscription is cancelled. Pro stays on until the end of the period you paid for.');
+        notify('ok', 'Your subscription is cancelled. Pro stays on until the end of the period you paid for.' +
+          (cancelForDelete ? ' You can delete your account now.' : ''));
+        cancelForDelete = false;
       });
     });
 
@@ -483,7 +522,8 @@
       var current = $('currentPassword').value;
       var password = $('newPassword').value;
       if (!current) { notify('err', 'Enter your current password.'); $('currentPassword').focus(); return; }
-      if (password.length < 8) { notify('err', 'Use at least 8 characters for your password.'); return; }
+      if (password.length < 8) { notify('err', 'Use at least 8 characters for your new password.'); return; }
+      if (password !== $('newPasswordConfirm').value) { notify('err', "The two new passwords don't match."); return; }
       busy(button, true);
       request('POST', '/api/auth/password', { password: password, current_password: current }).then(function (r) {
         busy(button, false);
@@ -491,6 +531,21 @@
         if (r.ok) $('passwordForm').reset();
       });
     });
+
+    // The same reset link as "Forgot your password?" when signed out, sent to
+    // this account's own address.
+    function sendResetLink(button) {
+      if (!accountEmail) { notify('err', 'Your email address is still loading. Try again in a moment.'); return; }
+      busy(button, true);
+      request('POST', '/api/auth/forgot-password', { email: accountEmail }).then(function (r) {
+        busy(button, false);
+        notify(r.ok ? 'ok' : 'err', r.ok
+          ? 'We sent a reset link to ' + accountEmail + '. Open it to set a new password.'
+          : errorText(r));
+      });
+    }
+    $('resetLinkBtn').addEventListener('click', function () { sendResetLink(this); });
+    $('deleteForgot').addEventListener('click', function () { sendResetLink(this); });
 
     // Only leave once the server has cleared the cookies: on a shared computer,
     // a sign-out that looked done but wasn't leaves the next person signed in.
@@ -505,18 +560,62 @@
       });
     });
 
-    /* Delete the account */
+    /* Delete the account. A plan that still renews has to be cancelled
+       first; the server refuses it too, so this dialog is only the reminder. */
+    var dialog = $('subBlock');
+    var afterDialog = null;
+
+    function openSubBlock() {
+      var b = plan || {};
+      var when = longDate(b.current_period_end);
+      $('subBlockText').textContent = (b.status === 'past_due'
+        ? 'Your Pro subscription has a payment due.'
+        : 'Your Pro subscription renews' + (when ? ' on ' + when : ' soon') + '.') +
+        " Cancel it before deleting your account. You keep Pro until the end of the period you paid for, and you won't be charged again.";
+      // With payments switched off here there's nothing on this page to cancel with.
+      $('subBlockCancel').hidden = !BILLING_ON;
+      afterDialog = $('deleteStart');
+      if (typeof dialog.showModal === 'function') {
+        dialog.showModal();
+      } else {
+        notify('err', $('subBlockText').textContent);
+      }
+    }
+
+    // Focus moves on straight away rather than in the close event, which the
+    // browser fires later; Escape closes the dialog itself and lands there.
+    function closeSubBlock(target) {
+      afterDialog = null;
+      if (dialog.open) dialog.close();
+      if (target) target.focus();
+    }
+    dialog.addEventListener('close', function () {
+      if (afterDialog) closeSubBlock(afterDialog);
+    });
+    // A click on the dimmed page around the dialog lands on the <dialog> itself.
+    dialog.addEventListener('click', function (e) { if (e.target === dialog) closeSubBlock($('deleteStart')); });
+    $('subBlockClose').addEventListener('click', function () { closeSubBlock($('deleteStart')); });
+    $('subBlockCancel').addEventListener('click', function () {
+      cancelForDelete = true;
+      $('cancelConfirm').hidden = false;
+      closeSubBlock($('cancelNo'));
+      try { $('cancelConfirm').scrollIntoView({ block: 'center' }); } catch (e) { /* old browsers */ }
+    });
+
+    function closeDeleteForm(focusStart) {
+      $('deleteForm').reset();
+      $('deleteForm').hidden = true;
+      $('deleteStart').hidden = false;
+      if (focusStart) $('deleteStart').focus();
+    }
+
     $('deleteStart').addEventListener('click', function () {
+      if (renews(plan)) { openSubBlock(); return; }
       $('deleteForm').hidden = false;
       $('deleteStart').hidden = true;
       $('deletePassword').focus();
     });
-    $('deleteCancel').addEventListener('click', function () {
-      $('deleteForm').reset();
-      $('deleteForm').hidden = true;
-      $('deleteStart').hidden = false;
-      $('deleteStart').focus();
-    });
+    $('deleteCancel').addEventListener('click', function () { closeDeleteForm(true); });
     $('deleteForm').addEventListener('submit', function (e) {
       e.preventDefault();
       if ($('deleteConfirm').value.trim() !== 'DELETE') { notify('err', 'Type DELETE in capitals to confirm.'); return; }
@@ -525,44 +624,46 @@
       busy(button, true);
       request('POST', '/api/auth/delete', { password: $('deletePassword').value }).then(function (r) {
         busy(button, false);
+        if (r.data.reason === 'active_subscription') {
+          // This page's copy of the plan was out of date: fetch the real one.
+          closeDeleteForm(false);
+          openSubBlock();
+          loadPlan(0);
+          return;
+        }
         if (!r.ok) { notify('err', errorText(r)); return; }
-        window.location.href = '/account?deleted=1';
+        window.location.href = '/login?deleted=1';
       });
     });
 
     request('GET', '/api/auth/me').then(function (r) {
+      $('profileLoading').hidden = true;
       if (!r.ok) { say(msg, 'err', errorText(r)); return; }
       var user = r.data.user;
-      if (user) {
-        // Signed in already, and sent here on the way somewhere: carry on.
-        if (next) { window.location.href = next; return; }
-        $('accountCard').classList.add('wide');
-        $('signedIn').hidden = false;
-        accountTag = tagFor(user.email);
-        renderProfile(user);
-        if (q.get('welcome') === '1') {
-          showWelcome('newAccountWelcome', 'newAccountWelcomeTitle', 'claimifi-welcome-seen');
-        }
-        loadPlan(0);
-      } else {
-        $('signedOut').hidden = false;
-        if (q.get('welcome') === '1') {
-          say(msg, 'ok', 'Your email is confirmed. Log in to open your account.');
-        }
-        if (next && next.indexOf('/pricing') === 0 && !msg.textContent) {
-          say(msg, 'info', 'Log in or create an account to subscribe to Pro.');
-        }
-        if (window.location.hash === '#forgot') show('forgot');
+      if (!user) {
+        // Signed out: log in first, then come back here with the same query.
+        var back = window.location.pathname + window.location.search;
+        window.location.replace(q.get('welcome') === '1' ? '/login?welcome=1'
+          : window.location.search ? '/login?next=' + encodeURIComponent(back) : '/login');
+        return;
       }
+      $('signedIn').hidden = false;
+      accountTag = tagFor(user.email);
+      accountEmail = user.email || '';
+      renderProfile(user);
+      if (q.get('welcome') === '1') {
+        showWelcome('newAccountWelcome', 'newAccountWelcomeTitle', 'claimifi-welcome-seen');
+      }
+      loadPlan(0);
     });
   }
 
   function linkMessage(code) {
     if (code === 'otp_expired' || code === 'invalid_link') {
-      return 'That link has expired or was already used. Log in, or request a new link from your account page.';
+      return 'That link has expired or was already used. Log in, or request a new link from the log-in page.';
     }
     if (code === 'rate_limited') return 'Too many attempts. Wait a minute, then try the link again.';
-    return "That link didn't work. Log in, or request a new link from your account page.";
+    return "That link didn't work. Log in, or request a new link from the log-in page.";
   }
 
   /* ---------------- Email link landing ---------------- */
@@ -603,8 +704,8 @@
       }
       window.location.replace(
         hash.type === 'recovery' ? '/reset-password'
-          : hash.type === 'email_change' ? '/account?email_changed=1'
-          : '/account?welcome=1');
+          : hash.type === 'email_change' ? '/profile?email_changed=1'
+          : '/profile?welcome=1');
     });
   }
 
@@ -629,14 +730,13 @@
         busy(button, false);
         if (r.ok) {
           form.hidden = true;
-          say(msg, 'ok', 'Your new password is saved. Taking you to your account…');
-          setTimeout(function () { window.location.href = '/account'; }, 1500);
+          say(msg, 'ok', 'Your new password is saved. Taking you to your profile…');
+          setTimeout(function () { window.location.href = '/profile'; }, 1500);
           return;
         }
-        // A reset link's session may set a password without the old one for an
-        // hour; after that it is an ordinary session, and this page can't help.
+        // An hour after the link was opened, the session needs the old password like any other.
         if (r.data.reason === 'signed_out' || r.data.reason === 'current_password_required') {
-          say(msg, 'err', 'This reset link has expired. Request a new one from the account page.');
+          say(msg, 'err', 'This reset link has expired. Request a new one from the log-in page.');
           return;
         }
         say(msg, 'err', errorText(r));
@@ -645,7 +745,8 @@
   }
 
   if (page === 'pricing') pricingPage();
-  else if (page === 'account') accountPage();
+  else if (page === 'login') loginPage();
+  else if (page === 'profile') profilePage();
   else if (page === 'callback') callbackPage();
   else if (page === 'reset') resetPage();
 })();

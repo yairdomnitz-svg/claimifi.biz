@@ -81,7 +81,7 @@
       "mainEntity": [
         { "@type": "Question", "name": "How does Claimifi.biz fact-check YouTube history videos?", "acceptedAnswer": { "@type": "Answer", "text": "Claimifi.biz retrieves the video's caption track, extracts the distinct historical claims, and evaluates the most significant of them against a fixed list of academic, archival, and fact-checking domains. Each claim checked receives one of four verdicts along with an explanation and the sources consulted." } },
         { "@type": "Question", "name": "Which sources does Claimifi.biz use?", "acceptedAnswer": { "@type": "Answer", "text": "Analysis is constrained to 32 domains covering historical associations, peer-reviewed journal databases, national archives, film and media archives, university presses, and established fact-checking organisations. The full list is published on the site." } },
-        { "@type": "Question", "name": "Is Claimifi.biz free to use?", "acceptedAnswer": { "@type": "Answer", "text": "Yes. Claimifi.biz is a free educational tool and requires no account. A per-visitor rate limit applies so the service stays available to everyone." } },
+        { "@type": "Question", "name": "Is Claimifi.biz free to use?", "acceptedAnswer": { "@type": "Answer", "text": "Yes. The free plan checks the 5 most significant claims in each video, and a per-visitor rate limit applies so the service stays available to everyone." } },
         { "@type": "Question", "name": "Why did my YouTube link fail?", "acceptedAnswer": { "@type": "Answer", "text": "The most common reason is that the video has no caption track, since there is no transcript to analyse. Private, deleted, and region-locked videos also cannot be retrieved. When that happens you can analyse the video's title instead." } },
         { "@type": "Question", "name": "Can I check a video without a transcript?", "acceptedAnswer": { "@type": "Answer", "text": "Yes. Enter the video's title instead of its URL. The analysis then covers the historical claims a video with that title typically makes, rather than the specific wording of that video." } },
         { "@type": "Question", "name": "How accurate is AI fact-checking?", "acceptedAnswer": { "@type": "Answer", "text": "Claimifi.biz is a research aid, not an authority. It is designed to surface claims worth checking and point you to the scholarship, but verdicts can be wrong or incomplete. Always confirm important claims against the primary sources cited." } }
@@ -111,7 +111,7 @@
     <div class="nav-right">
       <span class="status" id="status" role="status"><span class="dot" aria-hidden="true"></span><span id="statusText">Checking…</span></span>
       <span class="plan-badge" id="navPlan" hidden>Pro</span>
-      <a class="nav-account needs-accounts" id="navAccount" href="/account">Sign in</a>
+      <a class="nav-account needs-accounts" id="navAccount" href="/login">Sign in</a>
       <a class="btn-sm" href="/app">Open the app</a>
     </div>
   </div>
@@ -144,7 +144,7 @@
       <div class="trust">
         <div><svg viewBox="0 0 24 24" fill="none" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>32 vetted sources</div>
         <div><svg viewBox="0 0 24 24" fill="none" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>Every verdict cited</div>
-        <div><svg viewBox="0 0 24 24" fill="none" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>Free, no sign-up</div>
+        <div><svg viewBox="0 0 24 24" fill="none" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg><span class="needs-accounts">Free account</span><span class="accounts-off-only">Free to use</span></div>
       </div>
     </div>
 
@@ -152,7 +152,7 @@
     <div class="stats">
       <div class="stat"><div class="v">32</div><div class="k">Vetted sources</div></div>
       <div class="stat"><div class="v">4</div><div class="k">Verdict levels</div></div>
-      <div class="stat"><div class="v">0</div><div class="k">Accounts needed</div></div>
+      <div class="stat"><div class="v">5</div><div class="k">Claims checked free</div></div>
       <div class="stat"><div class="v">~60s</div><div class="k">Per analysis</div></div>
     </div>
 
@@ -330,7 +330,7 @@
         </details>
         <details class="faq">
           <summary>Is Claimifi.biz free to use?</summary>
-          <div class="a">Yes, and there is no sign-up. The free plan checks the 5 most significant claims in each video, and a per-visitor rate limit applies so the service stays available to everyone.<span class="needs-billing"> A paid <a href="/pricing">Pro plan</a> checks up to 20 claims with a deeper analysis of each.</span></div>
+          <div class="a">Yes.<span class="needs-accounts"> A free account is optional.</span> The free plan checks the 5 most significant claims in each video, and a per-visitor rate limit applies so the service stays available to everyone.<span class="needs-billing"> A paid <a href="/pricing">Pro plan</a> checks up to 20 claims with a deeper analysis of each.</span></div>
         </details>
         <details class="faq">
           <summary>Why did my YouTube link fail?</summary>
@@ -350,7 +350,7 @@
     <!-- ================= CTA ================= -->
     <div class="cta">
       <h2>Check a video now</h2>
-      <p>Free, no account, results in about a minute.</p>
+      <p>Free to start, results in about a minute.</p>
       <a class="btn" href="/app">
         <svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>
         Open the analyzer
@@ -391,7 +391,7 @@
         <h3>Company</h3>
         <ul>
           <li class="needs-billing"><a href="/pricing">Pricing</a></li>
-          <li class="needs-accounts"><a href="/account">Account</a></li>
+          <li class="needs-accounts"><a href="/profile">Your profile</a></li>
           <li><a href="/privacy">Privacy</a></li>
           <!--contact-link-->
         </ul>

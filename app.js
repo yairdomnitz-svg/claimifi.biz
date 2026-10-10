@@ -234,7 +234,10 @@
         var badge = $('navPlan');
         if (badge) badge.hidden = b.plan !== 'pro';
         var acct = $('navAccount');
-        if (acct) acct.textContent = b.signed_in ? 'Account' : 'Sign in';
+        if (acct) {
+          acct.textContent = b.signed_in ? 'Profile' : 'Sign in';
+          acct.setAttribute('href', b.signed_in ? '/profile' : '/login');
+        }
       })
       .catch(function () { /* the header simply keeps its defaults */ });
   }

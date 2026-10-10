@@ -31,6 +31,8 @@ def signed_in():
 
 PRO = {"customer_id": "cus_1", "subscription_id": "sub_1", "status": "active", "interval": "monthly",
        "current_period_end": 1_800_000_000, "cancel_at_period_end": False}
+# Cancelled, with paid time left: the only Pro plan an account can be deleted with.
+CANCELLED_PRO = {**PRO, "cancel_at_period_end": True}
 
 
 # --------------------------------------------------------------------------
@@ -100,7 +102,7 @@ def test_an_email_change_link_lands_on_the_account_page(acct):
     supa.on("POST", "/verify", body={"access_token": jwt(), "refresh_token": "rt-9", "expires_in": 3600, "user": user()})
     r = c.get("/auth/confirm?token_hash=abc&type=email_change", follow_redirects=False)
     assert r.status_code == 303
-    assert r.headers["location"] == "/account?email_changed=1"
+    assert r.headers["location"] == "/profile?email_changed=1"
 
 
 # --------------------------------------------------------------------------
@@ -152,7 +154,7 @@ def _deletable(acct, billing_state=None, billing=True):
 
 
 def test_deleting_the_account_cancels_billing_and_erases_the_user(acct):
-    _, c, supa, stripe = _deletable(acct, PRO)
+    _, c, supa, stripe = _deletable(acct, CANCELLED_PRO)
     stripe.on("DELETE", "/customers/cus_1", body={"id": "cus_1", "deleted": True})
     r = c.post("/api/auth/delete", json={"password": "correct horse"}, headers=signed_in())
     assert r.status_code == 200 and r.json() == {"status": "deleted"}
@@ -164,7 +166,7 @@ def test_deleting_the_account_cancels_billing_and_erases_the_user(acct):
 
 
 def test_a_wrong_password_deletes_nothing(acct):
-    _, c, supa, stripe = _deletable(acct, PRO)
+    _, c, supa, stripe = _deletable(acct, CANCELLED_PRO)
     supa.on("POST", "/token?password", status=400, body={"code": "invalid_credentials"})
     r = c.post("/api/auth/delete", json={"password": "nope"}, headers=signed_in())
     assert r.status_code == 403 and r.json()["reason"] == "invalid_credentials"
@@ -173,11 +175,28 @@ def test_a_wrong_password_deletes_nothing(acct):
 
 
 def test_if_billing_cannot_be_stopped_the_account_stays(acct):
-    _, c, supa, stripe = _deletable(acct, PRO)
+    _, c, supa, stripe = _deletable(acct, CANCELLED_PRO)
     stripe.on("DELETE", "/customers/cus_1", status=500, body={"error": {"type": "api_error"}})
     r = c.post("/api/auth/delete", json={"password": "correct horse"}, headers=signed_in())
     assert r.status_code == 502
     assert not [x for x in supa.calls if x["method"] == "DELETE"]
+
+
+@pytest.mark.parametrize("status", ["active", "trialing", "past_due"])
+def test_a_plan_that_still_renews_blocks_deletion(acct, status):
+    """Cancelling comes first. Nothing is checked or deleted, not even the password."""
+    _, c, supa, stripe = _deletable(acct, {**PRO, "status": status})
+    r = c.post("/api/auth/delete", json={"password": "correct horse"}, headers=signed_in())
+    assert r.status_code == 409 and r.json()["reason"] == "active_subscription"
+    assert stripe.calls == []
+    assert not [x for x in supa.calls if x["method"] == "DELETE" or x["path"].startswith("/token")]
+
+
+def test_a_cancelled_plan_that_has_ended_does_not_block_deletion(acct):
+    _, c, supa, stripe = _deletable(acct, {**PRO, "status": "canceled"})
+    stripe.on("DELETE", "/customers/cus_1", body={"id": "cus_1", "deleted": True})
+    r = c.post("/api/auth/delete", json={"password": "correct horse"}, headers=signed_in())
+    assert r.status_code == 200
 
 
 def test_a_free_user_is_deleted_without_touching_stripe(acct):
