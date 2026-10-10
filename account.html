@@ -218,6 +218,10 @@
           <h2 id="securityH">Password</h2>
           <form class="form" id="passwordForm" novalidate>
             <div class="form-field">
+              <label for="currentPassword">Current password</label>
+              <input type="password" id="currentPassword" autocomplete="current-password" required>
+            </div>
+            <div class="form-field">
               <label for="newPassword">New password</label>
               <input type="password" id="newPassword" autocomplete="new-password" minlength="8" required aria-describedby="newPasswordHelp">
               <p class="form-help" id="newPasswordHelp">At least 8 characters.</p>

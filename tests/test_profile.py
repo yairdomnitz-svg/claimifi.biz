@@ -203,3 +203,15 @@ def test_the_webhook_after_a_deletion_is_acknowledged(acct):
     payload, headers = signed(event("customer.subscription.deleted", {"id": "sub_1"}))
     r = c.post("/api/stripe/webhook", content=payload, headers=headers)
     assert r.status_code == 200
+
+
+
+def test_a_stripe_customer_that_is_already_gone_does_not_block_deletion(acct):
+    """A first attempt deleted the customer, then Supabase failed. The retry
+    finds the customer gone and must still finish, not fail for ever."""
+    _, c, supa, stripe = _deletable(acct, {**PRO, "status": "canceled"})
+    stripe.on("DELETE", "/customers/cus_1", status=404,
+              body={"error": {"type": "invalid_request_error", "code": "resource_missing"}})
+    r = c.post("/api/auth/delete", json={"password": "correct horse"}, headers=signed_in())
+    assert r.status_code == 200 and r.json() == {"status": "deleted"}
+    supa.last("DELETE", f"/admin/users/{USER_ID}")

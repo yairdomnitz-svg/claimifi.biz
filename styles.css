@@ -772,7 +772,14 @@ html:not([data-accounts="off"]) .accounts-off-only { display: none !important; }
      The analyzer sits in the hero on mobile and there is a CTA at the foot of
      the page, so the header button is the redundant one. */
   .nav-right .btn-sm { display: none; }
-  .nav-account { display: none; }
+  /* The account link stays: on a phone it is the only way to the plan, billing
+     and Sign out. With accounts on, the status badge gives up its words for the
+     room, keeping its colour, and its text for screen readers. */
+  html[data-accounts="on"] .status { padding: 9px; }
+  html[data-accounts="on"] .status #statusText {
+    position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap;
+  }
+  .nav-account { padding: 10px 0; }
   .auth-card, .plan { padding: 24px 20px; }
   .welcome-card, .welcome-card-new { grid-template-columns: 1fr; gap: 8px; padding: 20px; text-align: center; }
   .welcome-art { width: min(154px, 54vw); }
@@ -781,6 +788,11 @@ html:not([data-accounts="off"]) .accounts-off-only { display: none !important; }
   .welcome-actions { justify-content: center; }
   .welcome-actions .btn { width: 100%; }
   .welcome-features { text-align: left; }
+}
+@media (max-width: 380px) {
+  /* On the narrowest phones the Pro badge makes way for the account link,
+     which leads to the plan anyway. */
+  .nav-right .plan-badge { display: none; }
 }
 
 @media (prefers-reduced-motion: reduce) {

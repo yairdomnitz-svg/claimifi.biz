@@ -21,13 +21,13 @@ USER = {"id": "user-1", "email": "ada@example.com", "created_at": "2026-09-16T10
 GOOD = {"email": "ada@example.com", "password": "correct horse"}
 
 
-def jwt(exp_in: int = 3600) -> str:
+def jwt(exp_in: int = 3600, **claims) -> str:
     """An unsigned stand-in shaped like a Supabase access token."""
 
     def segment(obj):
         return base64.urlsafe_b64encode(json.dumps(obj).encode()).rstrip(b"=").decode()
 
-    payload = {"exp": int(time.time()) + exp_in, "sub": USER["id"], "email": USER["email"]}
+    payload = {"exp": int(time.time()) + exp_in, "sub": USER["id"], "email": USER["email"], **claims}
     return f"{segment({'alg': 'ES256'})}.{segment(payload)}.signature"
 
 
@@ -375,15 +375,58 @@ def test_a_forged_link_session_sets_nothing(auth):
     assert not set_cookies(r.headers)
 
 
-def test_a_new_password_is_set_with_the_visitors_own_token(auth):
+def recovered(seconds_ago: int = 60) -> str:
+    """An access token from a session a password-reset link opened."""
+    return jwt(amr=[{"method": "recovery", "timestamp": int(time.time()) - seconds_ago}])
+
+
+def test_a_reset_link_session_sets_a_new_password_without_the_old_one(auth):
     _, c, fake = auth()
     fake.on("GET", "/user", body=USER).on("PUT", "/user", body=USER)
-    token = jwt()
+    token = recovered()
     r = c.post("/api/auth/password", json={"password": "new correct horse"}, headers=sent(token, "rt-1"))
     assert r.json() == {"status": "updated"}
     call = fake.last("PUT", "/user")
     assert call["json"] == {"password": "new correct horse"}
     assert call["headers"]["Authorization"] == f"Bearer {token}"
+    assert not [x for x in fake.calls if x["path"].startswith("/token")]
+
+
+def test_a_signed_in_password_change_checks_the_current_password(auth):
+    _, c, fake = auth()
+    fake.on("GET", "/user", body=USER).on("PUT", "/user", body=USER)
+    fake.on("POST", "/token?password", body=session())
+    r = c.post(
+        "/api/auth/password",
+        json={"password": "new correct horse", "current_password": "old correct horse"},
+        headers=sent(jwt(amr=[{"method": "password", "timestamp": int(time.time())}]), "rt-1"),
+    )
+    assert r.json() == {"status": "updated"}
+    assert fake.last("POST", "/token")["json"] == {"email": USER["email"], "password": "old correct horse"}
+
+
+@pytest.mark.parametrize("token", [jwt(), recovered(seconds_ago=2 * 3600)])
+def test_the_cookie_alone_cannot_change_the_password(auth, token):
+    """A session left open on a shared computer must not be enough to take the
+    account over - nor, through a new password, to delete it."""
+    _, c, fake = auth()
+    fake.on("GET", "/user", body=USER).on("PUT", "/user", body=USER)
+    r = c.post("/api/auth/password", json={"password": "new correct horse"}, headers=sent(token, "rt-1"))
+    assert r.status_code == 400 and r.json()["reason"] == "current_password_required"
+    assert not [x for x in fake.calls if x["method"] == "PUT"]
+
+
+def test_a_wrong_current_password_changes_nothing(auth):
+    _, c, fake = auth()
+    fake.on("GET", "/user", body=USER).on("PUT", "/user", body=USER)
+    fake.on("POST", "/token?password", status=400, body={"code": "invalid_credentials"})
+    r = c.post(
+        "/api/auth/password",
+        json={"password": "new correct horse", "current_password": "guess"},
+        headers=sent(jwt(), "rt-1"),
+    )
+    assert r.status_code == 403 and r.json()["reason"] == "invalid_credentials"
+    assert not [x for x in fake.calls if x["method"] == "PUT"]
 
 
 def test_a_new_password_without_a_session_is_refused(auth):
@@ -398,8 +441,13 @@ def test_a_refreshed_session_survives_a_failed_password_change(auth):
     would leave the visitor holding a spent token, signed out moments later."""
     _, c, fake = auth()
     fake.on("POST", "/token?refresh_token", body=session(refresh="rt-2"))
+    fake.on("POST", "/token?password", body=session(refresh="rt-3"))
     fake.on("PUT", "/user", status=422, body={"code": "same_password", "msg": "New password should be different."})
-    r = c.post("/api/auth/password", json={"password": "same old password"}, headers=sent(jwt(exp_in=-5), "rt-1"))
+    r = c.post(
+        "/api/auth/password",
+        json={"password": "same old password", "current_password": "same old password"},
+        headers=sent(jwt(exp_in=-5), "rt-1"),
+    )
     assert r.status_code == 422
     assert r.json()["reason"] == "same_password"
     assert written(r.headers, "claimifi_refresh") == "rt-2"
@@ -520,3 +568,69 @@ def test_a_plain_form_post_cannot_plant_a_session(auth):
     r = c.post("/api/auth/session", content=body, headers={"Content-Type": "text/plain"})
     assert r.status_code == 422
     assert fake.calls == []
+
+
+# --------------------------------------------------------------------------
+# Account emails are rate-limited
+# --------------------------------------------------------------------------
+EMAIL_ROUTES = [
+    ("/api/auth/forgot-password", "/recover"),
+    ("/api/auth/resend", "/resend"),
+]
+
+
+@pytest.mark.parametrize("route,upstream", EMAIL_ROUTES)
+def test_one_visitor_cannot_send_unlimited_emails(auth, route, upstream):
+    """Supabase's email quota is shared by the whole project: one visitor
+    looping on these must not be able to block everyone's resets."""
+    from conftest import xff
+
+    _, c, fake = auth(EMAIL_RATE_LIMIT_REQUESTS="3", EMAIL_RATE_LIMIT_PER_ADDRESS="0")
+    fake.on("POST", upstream, body={})
+    codes = [
+        c.post(route, json={"email": f"person{i}@example.com"}, headers=xff("5.6.7.8")).status_code
+        for i in range(5)
+    ]
+    assert codes == [200, 200, 200, 429, 429]
+    assert len([x for x in fake.calls if x["path"] == upstream]) == 3
+    # Someone else is unaffected.
+    assert c.post(route, json={"email": "other@example.com"}, headers=xff("5.6.7.9")).status_code == 200
+
+
+def test_one_address_cannot_be_flooded_from_many_networks(auth):
+    from conftest import xff
+
+    _, c, fake = auth(EMAIL_RATE_LIMIT_REQUESTS="0", EMAIL_RATE_LIMIT_PER_ADDRESS="2")
+    fake.on("POST", "/recover", body={})
+    codes = [
+        c.post("/api/auth/forgot-password", json={"email": " Ada@Example.com "}, headers=xff(f"5.6.7.{i}")).status_code
+        for i in range(3)
+    ]
+    assert codes == [200, 200, 429]
+
+
+def test_the_email_limit_reads_the_same_for_any_address(auth):
+    """Whether the address has an account must not show in the refusal."""
+    _, c, fake = auth(EMAIL_RATE_LIMIT_REQUESTS="1", EMAIL_RATE_LIMIT_PER_ADDRESS="0")
+    fake.on("POST", "/recover", body={})
+    c.post("/api/auth/forgot-password", json={"email": "ada@example.com"})
+    r = c.post("/api/auth/forgot-password", json={"email": "nobody@example.com"})
+    assert r.status_code == 429
+    assert r.json()["reason"] == "too_many_emails"
+    assert int(r.headers["Retry-After"]) > 0
+
+
+def test_signup_is_counted_against_the_email_limit(auth):
+    _, c, fake = auth(EMAIL_RATE_LIMIT_REQUESTS="1", EMAIL_RATE_LIMIT_PER_ADDRESS="0")
+    fake.on("POST", "/signup", body={"id": "user-1", "email": "ada@example.com"})
+    assert c.post("/api/auth/signup", json={"email": "ada@example.com", "password": "correct horse"}).status_code == 200
+    r = c.post("/api/auth/signup", json={"email": "bob@example.com", "password": "correct horse"})
+    assert r.status_code == 429
+    assert len([x for x in fake.calls if x["path"] == "/signup"]) == 1
+
+
+def test_an_invalid_address_is_not_charged(auth):
+    _, c, fake = auth(EMAIL_RATE_LIMIT_REQUESTS="1", EMAIL_RATE_LIMIT_PER_ADDRESS="0")
+    fake.on("POST", "/recover", body={})
+    assert c.post("/api/auth/forgot-password", json={"email": "not an address"}).status_code == 400
+    assert c.post("/api/auth/forgot-password", json={"email": "ada@example.com"}).status_code == 200

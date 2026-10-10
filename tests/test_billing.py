@@ -98,6 +98,7 @@ def billing(client):
         module._stripe_client = stripe
         stripe.on("GET", "/prices", body=PRICES)
         stripe.on("GET", "/checkout/sessions", body={"object": "list", "data": []})
+        stripe.on("GET", "/subscriptions", body={"object": "list", "data": []})
         return module, c, supa, stripe
 
     return _make
@@ -248,6 +249,49 @@ def test_a_subscriber_cannot_start_a_second_subscription(billing):
     assert r.status_code == 409
     assert r.json()["reason"] == "already_subscribed"
     assert stripe.calls == []
+
+
+def test_a_paid_subscription_the_webhook_has_not_recorded_yet_blocks_checkout(billing):
+    """Paid, back on the site, webhook not here yet (or failing): the user record
+    still says free. A second checkout then would make a second subscription."""
+    _, c, supa, stripe = billing()
+    supa.on("GET", "/user", body=user({"customer_id": "cus_1"}))
+    stripe.on("GET", "/subscriptions", body={"object": "list", "data": [subscription()]})
+    webhook_ready(supa, stripe)
+    r = c.post("/api/billing/checkout", json={"interval": "monthly"}, headers=signed_in())
+    assert r.status_code == 409 and r.json()["reason"] == "already_subscribed"
+    assert ("POST", "/checkout/sessions") not in stripe.paths()
+    params = stripe.last("GET", "/subscriptions")["params"]
+    assert ("customer", "cus_1") in params and ("status", "all") in params
+    # And the plan is recorded now rather than waiting for the webhook.
+    assert supa.last("PUT", f"/admin/users/{USER_ID}")["json"]["app_metadata"]["billing"]["status"] == "active"
+
+
+def test_an_ended_subscription_does_not_block_checkout(billing):
+    _, c, supa, stripe = billing()
+    supa.on("GET", "/user", body=user({"customer_id": "cus_1", "status": "canceled"}))
+    stripe.on("GET", "/subscriptions", body={"object": "list", "data": [subscription(status="canceled")]})
+    stripe.on("POST", "/checkout/sessions", body={"url": "https://checkout.stripe.com/c/pay/cs_3"})
+    r = c.post("/api/billing/checkout", json={"interval": "monthly"}, headers=signed_in())
+    assert r.status_code == 200
+
+
+def test_a_customer_deleted_in_stripe_is_replaced_at_checkout(billing):
+    """After a deletion that got half way, or a customer removed in the Dashboard."""
+    _, c, supa, stripe = billing()
+    supa.on("GET", "/user", body=user({"customer_id": "cus_gone", "status": "canceled"}))
+    supa.on("PUT", f"/admin/users/{USER_ID}", body=user({"customer_id": "cus_new"}))
+    stripe.on("GET", "/subscriptions", status=404,
+              body={"error": {"type": "invalid_request_error", "code": "resource_missing"}})
+    stripe.on("POST", "/customers", body={"id": "cus_new"})
+    stripe.on("POST", "/checkout/sessions", body={"url": "https://checkout.stripe.com/c/pay/cs_4"})
+    r = c.post("/api/billing/checkout", json={"interval": "monthly"}, headers=signed_in())
+    assert r.status_code == 200
+    customer = stripe.last("POST", "/customers")
+    # Not the original key: Stripe would answer that with the deleted customer.
+    assert customer["headers"]["Idempotency-Key"] == f"claimifi-customer-{USER_ID}-after-cus_gone"
+    assert stripe.last("POST", "/checkout/sessions")["data"]["customer"] == "cus_new"
+    assert supa.last("PUT", f"/admin/users/{USER_ID}")["json"]["app_metadata"]["billing"]["customer_id"] == "cus_new"
 
 
 def test_a_missing_price_is_reported_not_guessed(billing):

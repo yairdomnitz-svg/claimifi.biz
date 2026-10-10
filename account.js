@@ -51,10 +51,17 @@
   }
 
   // Where to go after signing in. Only a path on this site: never a scheme, a
-  // //host or a backslash, which some browsers read as a slash.
+  // //host or a backslash, which some browsers read as a slash. Control
+  // characters are refused too: the URL parser strips tabs and newlines, so
+  // "/<tab>/evil.example" would otherwise become "//evil.example".
   function safeNext(value) {
-    if (!value || value.charAt(0) !== '/' || value.charAt(1) === '/' || value.indexOf('\\') > -1) return null;
-    return value;
+    if (!value || value.length > 300 || value.charAt(0) !== '/' || value.charAt(1) === '/' ||
+        value.indexOf('\\') > -1 || /[\u0000-\u001f\u007f]/.test(value)) return null;
+    try {
+      var url = new URL(value, window.location.origin);
+      if (url.origin !== window.location.origin) return null;
+      return url.pathname + url.search + url.hash;
+    } catch (e) { return null; }
   }
 
   function busy(button, on) {
@@ -473,18 +480,29 @@
     $('passwordForm').addEventListener('submit', function (e) {
       e.preventDefault();
       var button = $('passwordForm').querySelector('button[type="submit"]');
+      var current = $('currentPassword').value;
       var password = $('newPassword').value;
+      if (!current) { notify('err', 'Enter your current password.'); $('currentPassword').focus(); return; }
       if (password.length < 8) { notify('err', 'Use at least 8 characters for your password.'); return; }
       busy(button, true);
-      request('POST', '/api/auth/password', { password: password }).then(function (r) {
+      request('POST', '/api/auth/password', { password: password, current_password: current }).then(function (r) {
         busy(button, false);
         notify(r.ok ? 'ok' : 'err', r.ok ? 'Your password has been changed.' : errorText(r));
         if (r.ok) $('passwordForm').reset();
       });
     });
 
+    // Only leave once the server has cleared the cookies: on a shared computer,
+    // a sign-out that looked done but wasn't leaves the next person signed in.
     $('logoutBtn').addEventListener('click', function () {
-      request('POST', '/api/auth/logout').then(function () { window.location.href = '/'; });
+      var button = $('logoutBtn');
+      busy(button, true);
+      request('POST', '/api/auth/logout').then(function (r) {
+        if (r.ok) { window.location.href = '/'; return; }
+        busy(button, false);
+        notify('err', r.status ? errorText(r)
+          : "You're still signed in: Claimifi.biz couldn't be reached. Check your connection and try again.");
+      });
     });
 
     /* Delete the account */
@@ -541,10 +559,10 @@
 
   function linkMessage(code) {
     if (code === 'otp_expired' || code === 'invalid_link') {
-      return 'That link has expired or was already used. Log in, or request a new link below.';
+      return 'That link has expired or was already used. Log in, or request a new link from your account page.';
     }
     if (code === 'rate_limited') return 'Too many attempts. Wait a minute, then try the link again.';
-    return "That link didn't work. Log in, or request a new link below.";
+    return "That link didn't work. Log in, or request a new link from your account page.";
   }
 
   /* ---------------- Email link landing ---------------- */
@@ -558,10 +576,12 @@
         try { hash[decodeURIComponent(part.slice(0, i))] = decodeURIComponent(part.slice(i + 1).replace(/\+/g, ' ')); } catch (e) { /* skip */ }
       }
     });
+    // Read before the address is cleaned up below: /auth/confirm sends its
+    // failures here in the query, not the fragment.
+    var failed = hash.error_code || params().get('error_code');
     // The tokens must not sit in the address bar, the history or a bookmark.
     try { history.replaceState(null, '', window.location.pathname); } catch (e) { /* unavailable */ }
 
-    var failed = hash.error_code || params().get('error_code');
     if (failed || !ACCOUNTS_ON) {
       say(msg, 'err', ACCOUNTS_ON ? linkMessage(failed) : "Accounts aren't available yet.");
       $('callbackActions').hidden = false;
@@ -613,7 +633,9 @@
           setTimeout(function () { window.location.href = '/account'; }, 1500);
           return;
         }
-        if (r.data.reason === 'signed_out') {
+        // A reset link's session may set a password without the old one for an
+        // hour; after that it is an ordinary session, and this page can't help.
+        if (r.data.reason === 'signed_out' || r.data.reason === 'current_password_required') {
           say(msg, 'err', 'This reset link has expired. Request a new one from the account page.');
           return;
         }

@@ -197,6 +197,12 @@ GLOBAL_RATE_LIMIT_REQUESTS = _env_int("GLOBAL_RATE_LIMIT_REQUESTS", 300)
 GLOBAL_RATE_LIMIT_WINDOW = _env_int("GLOBAL_RATE_LIMIT_WINDOW", 3600)
 # Hard ceiling on distinct rate-limit buckets held in memory.
 MAX_RATE_BUCKETS = max(1000, _env_int("MAX_RATE_BUCKETS", 20_000))
+# Account emails (sign-up, confirmation, password reset, email change) per IP and
+# per address, per window. Supabase's email quota is shared by the whole project,
+# so without this one visitor could use it up and block everyone's resets. 0 disables.
+EMAIL_RATE_LIMIT_REQUESTS = _env_int("EMAIL_RATE_LIMIT_REQUESTS", 5)
+EMAIL_RATE_LIMIT_PER_ADDRESS = _env_int("EMAIL_RATE_LIMIT_PER_ADDRESS", 3)
+EMAIL_RATE_LIMIT_WINDOW = max(60, _env_int("EMAIL_RATE_LIMIT_WINDOW", 3600))
 # How many proxies append to X-Forwarded-For before the request reaches us.
 # 1 is Railway alone. Put a CDN in front (Cloudflare's orange cloud is the usual
 # one) and it becomes 2: Railway appends the CDN's edge address, and the real
@@ -947,6 +953,53 @@ async def refund_rate_limit(stamp: Optional[_RateStamp]) -> None:
                 _discard(bucket, stamp.at)
 
 
+_email_buckets: "OrderedDict[str, Deque[float]]" = OrderedDict()
+_email_lock = asyncio.Lock()
+
+
+async def enforce_email_limit(request: Request, email: str) -> None:
+    """Charge one account email to the caller's IP and to the address, or refuse it.
+
+    Both, because either alone leaves a gap: per IP only, a botnet can bury one
+    inbox; per address only, one visitor can mail every address there is and use
+    up the project's quota. The refusal reads the same whether or not the address
+    has an account, so it cannot be used to find out who has signed up.
+    """
+    checks = []
+    if EMAIL_RATE_LIMIT_REQUESTS > 0:
+        checks.append((f"ip:{_bucket_key(_client_ip(request))}", EMAIL_RATE_LIMIT_REQUESTS))
+    if EMAIL_RATE_LIMIT_PER_ADDRESS > 0:
+        address = hashlib.sha256(email.strip().lower().encode("utf-8")).hexdigest()
+        checks.append((f"to:{address}", EMAIL_RATE_LIMIT_PER_ADDRESS))
+    if not checks:
+        return
+    now = time.monotonic()
+    async with _email_lock:
+        buckets = []
+        for key, limit in checks:
+            bucket = _email_buckets.get(key)
+            if bucket is None:
+                bucket = _email_buckets[key] = deque()
+            else:
+                _email_buckets.move_to_end(key)
+            _trim(bucket, now, EMAIL_RATE_LIMIT_WINDOW)
+            if len(bucket) >= limit:
+                retry_after = int(EMAIL_RATE_LIMIT_WINDOW - (now - bucket[0])) + 1
+                raise AuthError(
+                    429,
+                    "Too many emails have been requested. Check your inbox and spam folder, "
+                    f"or try again in about {_window_label(retry_after)}.",
+                    reason="too_many_emails",
+                    headers={"Retry-After": str(retry_after)},
+                )
+            buckets.append(bucket)
+        # Charged only once every check has passed, so a refusal costs nothing.
+        for bucket in buckets:
+            bucket.append(now)
+        while len(_email_buckets) > MAX_RATE_BUCKETS:
+            _email_buckets.popitem(last=False)
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -1502,8 +1555,10 @@ def build_system_prompt(plan: str = "free") -> str:
 
 def _quoted(text: str) -> str:
     # The delimiter must not be closable from inside: a title or caption
-    # containing triple quotes would otherwise end the data block early.
-    return '"""\n' + text.replace('"""', '"') + '\n"""'
+    # containing triple quotes would otherwise end the data block early. Every
+    # run of three or more collapses: replace('"""', '"') made one pass, so
+    # five quotes came out as three and closed the block anyway.
+    return '"""\n' + re.sub(r'"{3,}', '"', text) + '\n"""'
 
 
 def build_user_content(transcript: str, video_context: str = "", basis: str = "transcript") -> str:
@@ -2209,18 +2264,47 @@ def _clear_session(response: Response, request: Request) -> None:
         response.delete_cookie(name, path="/", secure=secure, httponly=True, samesite="lax")
 
 
-def _token_expiry(token: str) -> float:
-    """When an access token lapses, read from its payload without verifying it.
+def _token_claims(token: str) -> Dict[str, Any]:
+    """An access token's payload, read without verifying it.
 
-    Only ever used to decide whether to refresh first. Whether a token is
-    genuine is Supabase's call, made in _user_for.
+    Whether a token is genuine is Supabase's call, made in _user_for; only read
+    claims from a token that has passed it, or for decisions that are safe either way.
     """
     try:
         segment = token.split(".")[1]
         claims = json.loads(base64.urlsafe_b64decode(segment + "=" * (-len(segment) % 4)))
-        return float(claims["exp"])
-    except (IndexError, KeyError, TypeError, ValueError, OverflowError):
+    except (IndexError, TypeError, ValueError, RecursionError):
+        return {}
+    return claims if isinstance(claims, dict) else {}
+
+
+def _token_expiry(token: str) -> float:
+    """When an access token lapses. Only ever used to decide whether to refresh first."""
+    try:
+        return float(_token_claims(token)["exp"])
+    except (KeyError, TypeError, ValueError, OverflowError):
         return 0.0
+
+
+# How long after opening a password-reset link the new password can be set
+# without the old one. Supabase records the recovery in the session's `amr`.
+RECOVERY_WINDOW_SECONDS = 3600
+
+
+def _recently_recovered(token: str) -> bool:
+    """Whether this (verified) session was opened by a password-reset link within the window."""
+    amr = _token_claims(token).get("amr")
+    if not isinstance(amr, list):
+        return False
+    for entry in amr:
+        if isinstance(entry, dict) and entry.get("method") == "recovery":
+            try:
+                at = float(entry.get("timestamp") or 0)
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if 0 <= time.time() - at <= RECOVERY_WINDOW_SECONDS:
+                return True
+    return False
 
 
 def _token_key(token: str) -> str:
@@ -2348,6 +2432,8 @@ class EmailBody(BaseModel):
 
 class PasswordBody(BaseModel):
     password: str = Field(max_length=1024)
+    # Required, except in the session a password-reset link has just opened.
+    current_password: Optional[str] = Field(default=None, max_length=1024)
 
 
 class LinkSessionBody(BaseModel):
@@ -2369,6 +2455,7 @@ async def auth_me(request: Request):
 async def auth_signup(req: SignupBody, request: Request):
     _require_auth(request)
     email, password = _email(req.email), _password(req.password)
+    await enforce_email_limit(request, email)
     data = await _auth_call(
         request,
         "POST",
@@ -2416,12 +2503,14 @@ async def auth_login(req: LoginBody, request: Request):
 @app.post("/api/auth/resend")
 async def auth_resend_confirmation(req: EmailBody, request: Request):
     _require_auth(request)
+    email = _email(req.email)
+    await enforce_email_limit(request, email)
     await _auth_call(
         request,
         "POST",
         "/resend",
         params={"redirect_to": _link_target()},
-        body={"type": "signup", "email": _email(req.email)},
+        body={"type": "signup", "email": email},
     )
     return JSONResponse({"status": "sent"}, headers=NO_STORE)
 
@@ -2429,12 +2518,14 @@ async def auth_resend_confirmation(req: EmailBody, request: Request):
 @app.post("/api/auth/forgot-password")
 async def auth_forgot_password(req: EmailBody, request: Request):
     _require_auth(request)
+    email = _email(req.email)
+    await enforce_email_limit(request, email)
     await _auth_call(
         request,
         "POST",
         "/recover",
         params={"redirect_to": _link_target()},
-        body={"email": _email(req.email)},
+        body={"email": email},
     )
     # Supabase answers the same whether or not the address has an account.
     return JSONResponse({"status": "sent"}, headers=NO_STORE)
@@ -2452,6 +2543,13 @@ async def auth_change_password(req: PasswordBody, request: Request):
         )
         return _with_session(_error_json(signed_out), request, session)
     try:
+        # The cookie alone is not enough: on a shared computer it would let anyone
+        # take the account over, and get past the password check on deletion.
+        # A reset link has just proved the inbox instead, so that session is let through.
+        if not _recently_recovered(session.token):
+            if not req.current_password:
+                raise AuthError(400, "Enter your current password.", reason="current_password_required")
+            await _check_password(request, session.user, req.current_password)
         await _auth_call(request, "PUT", "/user", body={"password": password}, token=session.token)
     except AuthError as exc:
         return _with_session(_error_json(exc), request, session)
@@ -2471,6 +2569,22 @@ DISPLAY_NAME_MAX = 80
 
 def _signed_out_error() -> AuthError:
     return AuthError(401, "Your session has ended. Log in again.", reason="signed_out")
+
+
+async def _check_password(request: Request, user: Dict[str, Any], password: str) -> None:
+    """Refuse unless `password` is the signed-in user's current one."""
+    try:
+        await _auth_call(
+            request,
+            "POST",
+            "/token",
+            params={"grant_type": "password"},
+            body={"email": user.get("email") or "", "password": password},
+        )
+    except AuthError as exc:
+        if exc.reason == "invalid_credentials":
+            raise AuthError(403, "That password isn't right.", reason="invalid_credentials") from exc
+        raise
 
 
 @app.post("/api/auth/profile")
@@ -2507,6 +2621,7 @@ async def auth_change_email(req: EmailBody, request: Request):
             raise _signed_out_error()
         if email.lower() == str(session.user.get("email") or "").lower():
             raise AuthError(400, "That's already your email address.", reason="same_email")
+        await enforce_email_limit(request, email)
         await _auth_call(
             request,
             "PUT",
@@ -2548,6 +2663,11 @@ async def _close_billing_for_deletion(user: Dict[str, Any]) -> None:
     try:
         await _stripe_call("DELETE", f"/customers/{customer_id}")
     except BillingError as exc:
+        if exc.missing:
+            # Already deleted: by an earlier attempt whose account deletion then
+            # failed, or in the Dashboard. Its subscriptions went with it.
+            log.info("Stripe customer %s was already deleted.", customer_id)
+            return
         log.error("Could not delete Stripe customer %s before account deletion.", customer_id)
         raise AuthError(
             502,
@@ -2571,18 +2691,7 @@ async def auth_delete_account(req: DeleteAccountBody, request: Request):
             raise _signed_out_error()
         if not req.password:
             raise AuthError(400, "Enter your password to confirm.", reason="validation_failed")
-        try:
-            await _auth_call(
-                request,
-                "POST",
-                "/token",
-                params={"grant_type": "password"},
-                body={"email": user.get("email") or "", "password": req.password},
-            )
-        except AuthError as exc:
-            if exc.reason == "invalid_credentials":
-                raise AuthError(403, "That password isn't right.", reason="invalid_credentials") from exc
-            raise
+        await _check_password(request, user, req.password)
         await _close_billing_for_deletion(user)
         await _auth_call(request, "DELETE", f"/admin/users/{user['id']}")
     except AuthError as exc:
@@ -2725,6 +2834,10 @@ _USER_ID_RE = re.compile(r"^[0-9a-fA-F-]{36}$")
 class BillingError(AuthError):
     """Shaped like an account refusal: a detail for the visitor and a reason code."""
 
+    # Stripe answered that the object asked about does not exist (deleted, or
+    # never made in this mode). Callers that can carry on without it check this.
+    missing: bool = False
+
 
 async def _stripe_call(
     method: str,
@@ -2761,7 +2874,9 @@ async def _stripe_call(
         )
         # Stripe's messages are written for developers and can name keys or IDs,
         # so none of it reaches the visitor.
-        raise BillingError(502, "The payment service couldn't do that. Please try again.", reason="billing_error")
+        exc = BillingError(502, "The payment service couldn't do that. Please try again.", reason="billing_error")
+        exc.missing = resp.status_code == 404 or error.get("code") == "resource_missing"
+        raise exc
     return body if isinstance(body, dict) else {}
 
 
@@ -2820,17 +2935,23 @@ async def _save_billing(request: Request, user_id: str, billing: Dict[str, Any])
     _forget_user(user_id)
 
 
-async def _customer_for(request: Request, user: Dict[str, Any]) -> str:
-    """The user's Stripe customer, created the first time they reach checkout."""
+async def _customer_for(request: Request, user: Dict[str, Any], replacing: Optional[str] = None) -> str:
+    """The user's Stripe customer, created the first time they reach checkout.
+
+    `replacing` names a stored customer Stripe no longer has (deleted in the
+    Dashboard, or by an account deletion that then failed), so a new one is made.
+    """
     existing = _billing(user).get("customer_id")
-    if isinstance(existing, str) and existing:
+    if isinstance(existing, str) and existing and not replacing:
         return existing
+    # Two checkout clicks at once still make one customer. A replacement needs a
+    # key of its own: Stripe would answer the old key with the deleted customer.
+    key = f"claimifi-customer-{user['id']}" + (f"-after-{replacing}" if replacing else "")
     customer = await _stripe_call(
         "POST",
         "/customers",
         data={"email": user.get("email") or "", "metadata[user_id]": user["id"]},
-        # Two checkout clicks at once still make one customer.
-        idempotency_key=f"claimifi-customer-{user['id']}",
+        idempotency_key=key,
     )
     customer_id = customer.get("id")
     if not isinstance(customer_id, str):
@@ -2971,14 +3092,24 @@ async def billing_checkout(req: CheckoutBody, request: Request):
         if not price:
             log.error("No active Stripe price has the lookup key %s.", PRICE_LOOKUP_KEYS[req.interval])
             raise BillingError(503, "That plan isn't available right now.", reason="price_missing")
+        had_customer = bool(_billing(user).get("customer_id"))
         customer_id = await _customer_for(request, user)
         # One open checkout per customer. Two tabs - or a monthly and a yearly
         # click - used to leave two payable checkouts, and paying both created
         # two subscriptions of which the site tracked one. Earlier ones are
         # expired first, under a per-user lock so two requests cannot interleave.
         async with _checkout_locks.setdefault(user["id"], asyncio.Lock()):
-            await _expire_open_checkouts(customer_id)
-            checkout = await _create_checkout(user, customer_id, price)
+            try:
+                if had_customer:
+                    await _refuse_a_second_subscription(request, user, customer_id)
+                await _expire_open_checkouts(customer_id)
+                checkout = await _create_checkout(user, customer_id, price)
+            except BillingError as exc:
+                if not exc.missing:
+                    raise
+                log.warning("Stripe customer %s no longer exists; making a new one.", customer_id)
+                customer_id = await _customer_for(request, user, replacing=customer_id)
+                checkout = await _create_checkout(user, customer_id, price)
         url = checkout.get("url")
         if not isinstance(url, str) or not url.startswith("https://"):
             raise BillingError(502, "The payment service sent an unexpected reply. Please try again.")
@@ -2988,6 +3119,30 @@ async def billing_checkout(req: CheckoutBody, request: Request):
 
 
 _checkout_locks: Dict[str, asyncio.Lock] = {}
+
+
+async def _refuse_a_second_subscription(request: Request, user: Dict[str, Any], customer_id: str) -> None:
+    """Refuse checkout while Stripe holds a paid subscription the user record does not show yet.
+
+    The plan reaches the user by webhook, a few seconds after payment, or hours
+    later if delivery fails and Stripe retries. Asking Stripe itself closes that
+    window: without it a second checkout in the meantime made a second subscription.
+    """
+    listing = await _stripe_call(
+        "GET",
+        "/subscriptions",
+        params=[("customer", customer_id), ("status", "all"), ("limit", "10")],
+    )
+    for sub in listing.get("data") or []:
+        if not isinstance(sub, dict) or sub.get("status") not in PAID_STATUSES or not isinstance(sub.get("id"), str):
+            continue
+        try:
+            await _sync_subscription(request, sub["id"], user["id"])
+        except AuthError:
+            log.warning("Could not record subscription %s ahead of its webhook.", sub["id"])
+        raise BillingError(
+            409, "You're already subscribed. Manage your plan from your account.", reason="already_subscribed"
+        )
 
 
 async def _expire_open_checkouts(customer_id: str) -> None:

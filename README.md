@@ -94,6 +94,9 @@ No Dockerfile and no `railway.toml` are needed (Config-as-Code is deprecated).
 | `PRO_RATE_LIMIT_REQUESTS` | No | Analyses per Pro account per `RATE_LIMIT_WINDOW`. Default `30`; `0` disables. Pro is metered per account, not per IP, and is outside the global limit. |
 | `CONTACT_EMAIL` | No | Shown as the Contact link in the footers and on the privacy page. Defaults to `yair.claimifi@gmail.com`; set it empty to show no contact link. |
 | `RATE_LIMIT_WINDOW` | No | Window in seconds. Default `600`. |
+| `EMAIL_RATE_LIMIT_REQUESTS` | No | Account emails (sign-up, confirmation resend, password reset, email change) per IP per `EMAIL_RATE_LIMIT_WINDOW`. Default `5`; `0` disables. Supabase's email quota is shared by the whole project, so without this one visitor could use it up and block everyone's resets. |
+| `EMAIL_RATE_LIMIT_PER_ADDRESS` | No | The same, per email address. Default `3`; `0` disables. A refusal reads the same whether or not the address has an account. |
+| `EMAIL_RATE_LIMIT_WINDOW` | No | Window for both, in seconds. Default `3600` (at least `60`). |
 | `WEBSHARE_PROXY_USERNAME` / `WEBSHARE_PROXY_PASSWORD` | See below | Residential proxy for transcript fetching. |
 | `WEBSHARE_RETRIES` | No | Retries when an exit node is blocked; each one rotates to a fresh IP. Default `2`. Webshare's own default is 10, which can occupy a worker thread for two minutes. |
 | `WEBSHARE_IP_LOCATIONS` | No | Country codes (`nl,de,gb`) to pin the exit pool nearer the deploy region. Empty uses the full pool. |
