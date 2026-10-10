@@ -79,6 +79,8 @@
     }
   }
 
+  var EMAIL_CHANGE_HALF_DONE = 'That link worked. To finish changing your email, open the link we sent to your other address too.';
+
   function longDate(unixSeconds) {
     if (typeof unixSeconds !== 'number') return '';
     try {
@@ -134,8 +136,23 @@
         subscribe.textContent = 'Subscribe to Pro' + (p ? ' · ' + money(p.amount, p.currency) + (interval === 'yearly' ? '/yr' : '/mo') : '');
       }
       subscribe.disabled = !!status && !p && status.plan !== 'pro';
-      if (status && !p && status.plan !== 'pro') say(msg, 'err', "Pro isn't available to buy right now. Please check back soon.");
+      if (status && !p && status.plan !== 'pro') {
+        say(msg, 'err', UNAVAILABLE);
+      } else if (msg.textContent === UNAVAILABLE) {
+        // Switched to an interval that can be bought: the refusal no longer applies.
+        say(msg, '', '');
+      }
     }
+    var UNAVAILABLE = "Pro isn't available to buy right now. Please check back soon.";
+
+    // Back from Stripe, the browser can restore this page as it was left: the
+    // button still disabled under "Taking you to secure checkout…".
+    window.addEventListener('pageshow', function (e) {
+      if (!e.persisted) return;
+      busy(subscribe, false);
+      if (msg.textContent === 'Taking you to secure checkout…') say(msg, '', '');
+      render();
+    });
 
     monthlyBtn.addEventListener('click', function () { interval = 'monthly'; render(); });
     yearlyBtn.addEventListener('click', function () { interval = 'yearly'; render(); });
@@ -293,6 +310,7 @@
 
     if (q.get('checkout') === 'success') say(msg, 'ok', 'Thank you! Your payment went through. Pro switches on within a few seconds.');
     if (q.get('email_changed') === '1') say(msg, 'ok', 'Your email address has been changed.');
+    if (q.get('email_change') === 'pending') say(msg, 'info', EMAIL_CHANGE_HALF_DONE);
 
     // Messages scroll into view: on a long account page the result of a click
     // near the bottom would otherwise appear off-screen at the top.
@@ -349,14 +367,16 @@
       try { window.localStorage.setItem(welcomeKey(key), '1'); } catch (e) { /* storage unavailable */ }
     }
 
+    // Whether the card opened: once dismissed, it stays away for this account.
     function showWelcome(cardId, titleId, storageKey) {
-      if (welcomeSeen(storageKey)) return;
+      if (welcomeSeen(storageKey)) return false;
       var card = $(cardId);
       var title = $(titleId);
       card.hidden = false;
       window.setTimeout(function () {
         try { title.focus({ preventScroll: true }); } catch (e) { title.focus(); }
       }, 0);
+      return true;
     }
 
     function dismissWelcome(cardId, storageKey) {
@@ -426,9 +446,11 @@
         if (!r.ok) return;
         renderPlan(r.data);
         if (q.get('checkout') === 'success' && r.data.plan === 'pro') {
-          msg.textContent = '';
           $('newAccountWelcome').hidden = true;
-          showWelcome('proWelcome', 'proWelcomeTitle', 'claimifi-pro-welcome-seen');
+          // The card says it all the first time. Someone coming back to Pro has
+          // seen it already, and still needs to hear the payment worked.
+          if (showWelcome('proWelcome', 'proWelcomeTitle', 'claimifi-pro-welcome-seen')) say(msg, '', '');
+          else say(msg, 'ok', 'Thank you! Your payment went through, and Pro is on.');
         }
         // Stripe tells the site about a payment by webhook, a moment after the
         // visitor is sent back here. Look again a few times before giving up.
@@ -472,6 +494,9 @@
     });
 
     /* Subscription: portal, cancel, resume */
+    // Back from Stripe's portal, the browser can restore the page with the
+    // button still disabled.
+    window.addEventListener('pageshow', function (e) { if (e.persisted) busy($('portalBtn'), false); });
     $('portalBtn').addEventListener('click', function () {
       var button = $('portalBtn');
       busy(button, true);
@@ -500,6 +525,9 @@
         renderPlan(r.data);
         notify('ok', 'Your subscription is cancelled. Pro stays on until the end of the period you paid for.' +
           (cancelForDelete ? ' You can delete your account now.' : ''));
+        // The button that had focus is gone now: keep the keyboard where the
+        // visitor is headed, not back at the top of the page.
+        (cancelForDelete ? $('deleteStart') : $('resumeBtn')).focus();
         cancelForDelete = false;
       });
     });
@@ -512,6 +540,7 @@
         if (!r.ok) { notify('err', errorText(r)); return; }
         renderPlan(r.data);
         notify('ok', 'Welcome back: your Pro plan will renew as normal.');
+        $('cancelBtn').focus();
       });
     });
 
@@ -689,6 +718,14 @@
       return;
     }
     if (!hash.access_token || !hash.refresh_token) {
+      // Supabase's secure email change sends a link to both addresses. The first
+      // arrives with only a message: that half worked. Our own words are shown,
+      // never the message from the address bar, which anyone can write.
+      if (hash.message) {
+        say(msg, 'info', EMAIL_CHANGE_HALF_DONE);
+        $('callbackActions').hidden = false;
+        return;
+      }
       say(msg, 'err', linkMessage('invalid_link'));
       $('callbackActions').hidden = false;
       return;

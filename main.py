@@ -25,6 +25,7 @@ import html
 import ipaddress
 import json
 import logging
+import math
 import os
 import re
 import time
@@ -628,11 +629,14 @@ async def _budget_snapshot() -> Dict[str, Any]:
         spent = dict(_spent)
         calls = _spend_calls
     return {
+        # Each pool's spend sits next to its own budget: reporting the total as
+        # spent_today_usd made Pro spend read as the free budget overspent.
         "daily_budget_usd": DAILY_BUDGET_USD,
-        "spent_today_usd": round(spent["free"] + spent["pro"], 4),
+        "spent_today_usd": round(spent["free"], 4),
         "calls_today": calls,
         "pro_daily_budget_usd": PRO_DAILY_BUDGET_USD,
         "pro_spent_today_usd": round(spent["pro"], 4),
+        "total_spent_today_usd": round(spent["free"] + spent["pro"], 4),
     }
 
 
@@ -1638,7 +1642,10 @@ def _extract_json_object(raw: str) -> Dict[str, Any]:
             continue
         try:
             parsed = json.loads(candidate)
-        except json.JSONDecodeError:
+        except (ValueError, RecursionError):
+            # ValueError covers JSONDecodeError and an integer past Python's
+            # 4300-digit limit; RecursionError, nesting a thousand levels deep.
+            # Either is a malformed reply (a billed 502), not a crash (a 500).
             continue
         if isinstance(parsed, list) and all(isinstance(x, dict) for x in parsed):
             # A bare array is the model answering with just the claims list.
@@ -1889,9 +1896,10 @@ def _clean_list(values: Any, limit: int, item_chars: int = MAX_LIST_ITEM_CHARS) 
 def _clean_confidence(value: Any) -> Optional[int]:
     try:
         number = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
-    if number != number:  # NaN
+    # NaN, and the infinity json.loads makes of "1e999": round() raises on it.
+    if not math.isfinite(number):
         return None
     # A model that answers on a 0-1 scale despite the instructions.
     if 0 < number <= 1 and not float(number).is_integer():
@@ -1968,6 +1976,12 @@ _VERDICT_KEYS = {
 }
 
 
+def _round_half_up(value: float) -> int:
+    """62.5 -> 63. Python's round() goes to the even neighbour (62.5 -> 62, but
+    37.5 -> 38), so equal ties in a score went different ways."""
+    return math.floor(value + 0.5)
+
+
 def _metrics(claims: List[Claim]) -> Dict[str, Any]:
     """Pro's numbers, computed here from the verdicts rather than asked of the model.
 
@@ -1986,7 +2000,7 @@ def _metrics(claims: List[Claim]) -> Dict[str, Any]:
     # left out: it says nothing either way about the video's accuracy.
     judged = by_verdict["supported"] + by_verdict["mixed"] + by_verdict["unsupported"]
     accuracy = (
-        round(100 * (by_verdict["supported"] + 0.5 * by_verdict["mixed"]) / judged) if judged else None
+        _round_half_up(100 * (by_verdict["supported"] + 0.5 * by_verdict["mixed"]) / judged) if judged else None
     )
     confidences = [c.confidence for c in claims if c.confidence is not None]
     return {
@@ -1995,7 +2009,7 @@ def _metrics(claims: List[Claim]) -> Dict[str, Any]:
         "by_category": dict(sorted(by_category.items(), key=lambda kv: (-kv[1], kv[0]))),
         "accuracy_score": accuracy,
         "claims_judged": judged,
-        "average_confidence": round(sum(confidences) / len(confidences)) if confidences else None,
+        "average_confidence": _round_half_up(sum(confidences) / len(confidences)) if confidences else None,
     }
 
 
@@ -2014,7 +2028,7 @@ REFRESH_COOKIE = "claimifi_refresh"
 # refresh token each time it is used, so an active visitor never reaches it.
 SESSION_MAX_AGE = 30 * 86_400
 # The floor is this site's choice. The ceiling is Supabase's own: bcrypt ignores
-# everything past 72.
+# everything past 72 bytes.
 PASSWORD_MIN = 8
 PASSWORD_MAX = 72
 # A session opened by an email link this recently may set a password without
@@ -2202,8 +2216,15 @@ def _email(value: str) -> str:
 def _password(value: str) -> str:
     if len(value) < PASSWORD_MIN:
         raise AuthError(422, f"Use at least {PASSWORD_MIN} characters for your password.", reason="weak_password")
-    if len(value) > PASSWORD_MAX:
-        raise AuthError(422, f"Use at most {PASSWORD_MAX} characters for your password.", reason="weak_password")
+    # Supabase hashes with bcrypt, which reads at most 72 bytes. An accented
+    # letter is 2 bytes and an emoji 4, so the limit is counted in bytes.
+    if len(value.encode("utf-8")) > PASSWORD_MAX:
+        raise AuthError(
+            422,
+            f"That password is too long. Use at most {PASSWORD_MAX} characters, "
+            "or fewer if it has accented letters or symbols.",
+            reason="weak_password",
+        )
     return value
 
 
@@ -2640,6 +2661,14 @@ async def auth_change_email(req: EmailBody, request: Request):
             token=session.token,
         )
     except AuthError as exc:
+        # Sign-up never says whether an address has an account, and neither does
+        # this: any signed-in visitor could otherwise test addresses one by one.
+        # No email goes out, and the change simply never completes.
+        if exc.reason in ("email_exists", "user_already_exists"):
+            log.info("Email change to an address that already has an account; answered as sent.")
+            return _with_session(
+                JSONResponse({"status": "confirmation_sent"}, headers=NO_STORE), request, session
+            )
         return _with_session(_error_json(exc), request, session)
     _forget_user(session.user["id"])
     return _with_session(
@@ -2804,6 +2833,10 @@ async def auth_confirm(
             code = "otp_expired"
         return RedirectResponse(failed + code, status_code=303)
     if not _has_tokens(data):
+        if link_type == "email_change":
+            # Supabase's secure email change needs a link from both addresses.
+            # The first one verifies and starts no session: that half worked.
+            return RedirectResponse(f"{AUTH_ACCOUNT_PATH}?email_change=pending", status_code=303, headers=NO_STORE)
         return RedirectResponse(failed + "otp_expired", status_code=303)
     if isinstance(data.get("user"), dict):
         _remember_user(data["access_token"], data["user"])
@@ -3553,7 +3586,8 @@ async def _analysis_plan(request: Request) -> tuple:
 def _claims_found(value: Any, checked: int) -> Optional[int]:
     try:
         found = int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
+        # OverflowError: json.loads reads "1e999" as infinity.
         return None
     return max(checked, min(found, 200))
 
@@ -3590,6 +3624,10 @@ async def _run_analysis(
     video_id: Optional[str] = None
 
     if url:
+        # A link is checked on what YouTube says about it. A title sent with it
+        # would skip the title checks below and could pin any claims to any
+        # video, so it is ignored; the page never sends both.
+        title = ""
         video_id = extract_video_id(url)
         if not video_id:
             raise HTTPException(
@@ -3606,7 +3644,7 @@ async def _run_analysis(
                         status_code=422, detail="The transcript is too short to analyze."
                     )
             else:
-                looked_up = title or await fetch_video_title(video_id)
+                looked_up = await fetch_video_title(video_id)
         except HTTPException as exc:
             # Only refund what the server got wrong. A 404 for a captionless
             # video is an answer about the video the caller chose, and charging
@@ -3615,8 +3653,8 @@ async def _run_analysis(
                 await refund_rate_limit(stamp)
             raise
         if req.transcript:
-            video_title = title or f"YouTube video ({video_id})"
-            context = title
+            video_title = f"YouTube video ({video_id})"
+            context = ""
             basis = "transcript"
         else:
             video_title = context = looked_up

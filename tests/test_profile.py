@@ -234,3 +234,22 @@ def test_a_stripe_customer_that_is_already_gone_does_not_block_deletion(acct):
     r = c.post("/api/auth/delete", json={"password": "correct horse"}, headers=signed_in())
     assert r.status_code == 200 and r.json() == {"status": "deleted"}
     supa.last("DELETE", f"/admin/users/{USER_ID}")
+
+
+
+def test_an_email_change_to_a_taken_address_reads_like_any_other(acct):
+    """Sign-up never says whether an address has an account; neither does this."""
+    _, c, supa, _ = acct()
+    supa.on("GET", "/user", body=user())
+    supa.on("PUT", "/user", status=422, body={"code": "email_exists", "msg": "A user with this email address has already been registered"})
+    r = c.post("/api/auth/email", json={"email": "someone@else.example"}, headers=signed_in())
+    assert r.status_code == 200 and r.json() == {"status": "confirmation_sent"}
+
+
+def test_the_first_of_two_email_change_links_is_not_called_expired(acct):
+    """Secure email change: the first link verifies and starts no session."""
+    _, c, supa, _ = acct()
+    supa.on("POST", "/verify", body={"msg": "Confirmation link accepted. Please proceed to confirm link sent to the other email"})
+    r = c.get("/auth/confirm?token_hash=abc&type=email_change", follow_redirects=False)
+    assert r.status_code == 303
+    assert r.headers["location"] == "/profile?email_change=pending"

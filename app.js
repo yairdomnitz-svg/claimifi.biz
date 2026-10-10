@@ -220,9 +220,17 @@
   /* ---------------- Plan and account in the header ---------------- */
 
   var BILLING_ON = document.documentElement.getAttribute('data-billing') === 'on';
+  var ACCOUNTS_ON = document.documentElement.getAttribute('data-accounts') === 'on';
   // The visitor's plan as far as this page knows. It only shapes the waiting
   // messages: what an analysis actually gets is decided by the server.
   var currentPlan = 'free';
+
+  function showSignedIn(signedIn) {
+    var acct = $('navAccount');
+    if (!acct) return;
+    acct.textContent = signedIn ? 'Profile' : 'Sign in';
+    acct.setAttribute('href', signedIn ? '/profile' : '/login');
+  }
 
   // Only once payments exist: until then there is no plan to show, and the
   // request would be one more for every visitor on every page.
@@ -233,12 +241,15 @@
         currentPlan = b.plan === 'pro' ? 'pro' : 'free';
         var badge = $('navPlan');
         if (badge) badge.hidden = b.plan !== 'pro';
-        var acct = $('navAccount');
-        if (acct) {
-          acct.textContent = b.signed_in ? 'Profile' : 'Sign in';
-          acct.setAttribute('href', b.signed_in ? '/profile' : '/login');
-        }
+        showSignedIn(!!b.signed_in);
       })
+      .catch(function () { /* the header simply keeps its defaults */ });
+  } else if (ACCOUNTS_ON) {
+    // Accounts can be on before payments are: the header still has to know
+    // who is signed in, or it offers "Sign in" to someone who already is.
+    fetch('/api/auth/me', { cache: 'no-store', credentials: 'same-origin' })
+      .then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); })
+      .then(function (me) { showSignedIn(!!me.user); })
       .catch(function () { /* the header simply keeps its defaults */ });
   }
 

@@ -139,3 +139,46 @@ def test_control_characters_are_stripped(main):
 def test_missing_claims_key(main):
     assert main._normalize_claims({}) == []
     assert main._normalize_claims({"claims": "nope"}) == []
+
+
+# --------------------------------------------------------------------------
+# Replies that are valid JSON but break number handling
+# --------------------------------------------------------------------------
+@pytest.mark.parametrize("raw", [
+    '{"claims": [], "n": ' + "9" * 5000 + '}',   # past Python's int-digit limit
+    "[" * 5000 + "]" * 5000,                        # nested past the recursion limit
+])
+def test_a_reply_json_cannot_parse_is_a_502_not_a_crash(main, raw):
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as exc:
+        main._extract_json_object(raw)
+    assert exc.value.status_code == 502
+
+
+@pytest.mark.parametrize("value", [float("inf"), float("-inf"), float("nan"), 10 ** 400, "1e999"])
+def test_a_confidence_that_is_not_a_finite_number_is_dropped(main, value):
+    assert main._clean_confidence(value) is None
+
+
+def test_an_infinite_claims_found_is_dropped(main):
+    import json
+
+    assert main._claims_found(json.loads('{"n": 1e999}')["n"], 5) is None
+
+
+# --------------------------------------------------------------------------
+# Metrics round halves up
+# --------------------------------------------------------------------------
+@pytest.mark.parametrize("supported,mixed,unsupported,expected", [
+    (0, 1, 3, 13), (1, 1, 2, 38), (2, 1, 1, 63), (3, 1, 0, 88),
+])
+def test_the_accuracy_score_rounds_halves_up(main, supported, mixed, unsupported, expected):
+    verdicts = ["Supported"] * supported + ["Mixed"] * mixed + ["Unsupported"] * unsupported
+    claims = [main.Claim(claim=f"c{i}", verdict=v, explanation="e") for i, v in enumerate(verdicts)]
+    assert main._metrics(claims)["accuracy_score"] == expected
+
+
+def test_the_average_confidence_rounds_halves_up(main):
+    claims = [main.Claim(claim=f"c{i}", verdict="Supported", explanation="e", confidence=c) for i, c in enumerate([50, 51])]
+    assert main._metrics(claims)["average_confidence"] == 51

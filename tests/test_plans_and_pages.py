@@ -360,3 +360,25 @@ def test_no_visitor_message_names_an_env_var(fresh_main):
     literal = [re.sub(r"\{[^}]*\}", "", d) for d in details]
     leaking = [d for d in literal if re.search(r"\b[A-Z]{3,}_[A-Z_]{3,}\b", d)]
     assert not leaking, leaking
+
+
+def test_a_title_sent_with_a_link_is_ignored(live, monkeypatch):
+    """The page never sends both. An API caller who did skipped the title checks
+    and could pin any claims to any video."""
+    module, c, grok = live()
+    monkeypatch.setattr(module, "fetch_video_title", AsyncMock(return_value="The Real Title"))
+    r = c.post("/api/analyze", json={"url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+                                     "title": "​​​", "transcript": False})
+    assert r.status_code == 200
+    assert grok.await_args.kwargs["video_context"] == "The Real Title"
+    assert r.json()["video_title"] == "The Real Title"
+
+
+def test_health_reports_each_pools_spend_against_its_own_budget(fresh_main):
+    main = fresh_main()
+    asyncio.run(main._budget_snapshot())  # starts today's tally
+    main._spent["pro"] = 5.0
+    budget = asyncio.run(main._budget_snapshot())
+    assert budget["spent_today_usd"] == 0.0
+    assert budget["pro_spent_today_usd"] == 5.0
+    assert budget["total_spent_today_usd"] == 5.0

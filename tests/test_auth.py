@@ -624,3 +624,14 @@ def test_an_invalid_address_is_not_charged(auth):
     fake.on("POST", "/recover", body={})
     assert c.post("/api/auth/forgot-password", json={"email": "not an address"}).status_code == 400
     assert c.post("/api/auth/forgot-password", json={"email": "ada@example.com"}).status_code == 200
+
+
+
+def test_the_password_ceiling_counts_bytes_not_characters(auth):
+    """bcrypt reads 72 bytes. Forty accented letters are 80 of them."""
+    _, c, fake = auth()
+    fake.on("POST", "/signup", body={"id": "user-1", "email": "ada@example.com"})
+    r = c.post("/api/auth/signup", json={"email": "ada@example.com", "password": "é" * 40})
+    assert r.status_code == 422 and r.json()["reason"] == "weak_password"
+    assert not [x for x in fake.calls if x["path"] == "/signup"]
+    assert c.post("/api/auth/signup", json={"email": "ada@example.com", "password": "é" * 36}).status_code == 200
