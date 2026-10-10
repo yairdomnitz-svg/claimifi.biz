@@ -618,8 +618,10 @@
       if (dialog.open) dialog.close();
       if (target) target.focus();
     }
+    // The browser can deliver a close late, after the dialog was opened again;
+    // that one belongs to the earlier close and must not shut this one.
     dialog.addEventListener('close', function () {
-      if (afterDialog) closeSubBlock(afterDialog);
+      if (!dialog.open && afterDialog) closeSubBlock(afterDialog);
     });
     // A click on the dimmed page around the dialog lands on the <dialog> itself.
     dialog.addEventListener('click', function (e) { if (e.target === dialog) closeSubBlock($('deleteStart')); });
