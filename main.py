@@ -35,6 +35,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
+from urllib.parse import quote
 from typing import Any, Deque, Dict, List, Optional
 
 import httpx
@@ -3366,6 +3367,12 @@ PAGES = {
 }
 
 
+# Pages only a signed-in visitor may open once accounts are on. Anyone else is
+# sent to log in and brought back afterwards. The API behind each page checks
+# again, so this is the way in rather than the lock.
+GATED_PAGES = {"/app"}
+
+
 def _page_route(name: str):
     async def serve() -> HTMLResponse:
         return _serve_page(name)
@@ -3373,8 +3380,34 @@ def _page_route(name: str):
     return serve
 
 
+def _gated_page_route(path: str, name: str):
+    async def serve(request: Request) -> Response:
+        if not AUTH_ENABLED:
+            return _serve_page(name)
+        back = path + (f"?{request.url.query}" if request.url.query else "")
+        to_login = RedirectResponse(
+            f"{AUTH_LOGIN_PATH}?next={quote(back, safe='/')}", status_code=303, headers=NO_STORE
+        )
+        if not _has_session_cookie(request):
+            return to_login
+        try:
+            session = await _current_session(request)
+        except AuthError as exc:
+            # The account service is down, so the login page could not help
+            # either. The page opens; the analysis it sends is refused with the
+            # reason until the service is back.
+            log.warning("Could not read the session for %s (status %s); serving the page.", path, exc.status_code)
+            return _serve_page(name, private=True)
+        if not _signed_in(session):
+            return _with_session(to_login, request, session)
+        return _with_session(_serve_page(name, private=True), request, session)
+
+    return serve
+
+
 for _path, _name in PAGES.items():
-    app.add_api_route(_path, _page_route(_name), methods=PAGE_METHODS, include_in_schema=False)
+    _route = _gated_page_route(_path, _name) if _path in GATED_PAGES else _page_route(_name)
+    app.add_api_route(_path, _route, methods=PAGE_METHODS, include_in_schema=False)
 
 
 @app.api_route(LEGACY_ACCOUNT_PATH, methods=PAGE_METHODS, include_in_schema=False)
@@ -3455,10 +3488,12 @@ def _render_page(name: str) -> str:
     return text
 
 
-def _serve_page(name: str) -> HTMLResponse:
+def _serve_page(name: str, private: bool = False) -> HTMLResponse:
+    # A page served to one signed-in visitor is never stored, so the back
+    # button after a sign-out asks the server again.
     return HTMLResponse(
         content=_render_page(name),
-        headers={"Cache-Control": "no-cache, must-revalidate"},
+        headers=NO_STORE if private else {"Cache-Control": "no-cache, must-revalidate"},
     )
 
 
@@ -3494,7 +3529,10 @@ async def robots():
 
 @app.api_route("/sitemap.xml", methods=PAGE_METHODS, include_in_schema=False)
 async def sitemap():
-    entries = [("/", "1.0"), ("/app", "0.8")]
+    entries = [("/", "1.0")]
+    # Behind a login once accounts are on, so nothing there for a crawler.
+    if not AUTH_ENABLED:
+        entries.append(("/app", "0.8"))
     # Listed only once it can sell something; until then it is a notice.
     if BILLING_ENABLED:
         entries.append((PRICING_PATH, "0.6"))
@@ -3562,22 +3600,37 @@ async def config():
     }
 
 
+def _has_session_cookie(request: Request) -> bool:
+    return bool(request.cookies.get(ACCESS_COOKIE) or request.cookies.get(REFRESH_COOKIE))
+
+
+def _signed_in(session: _Session) -> bool:
+    # A refresh that worked while the user lookup did not still proves the
+    # visitor holds a live session.
+    return bool(session.user or session.renewed)
+
+
+def _login_required() -> AuthError:
+    return AuthError(
+        401, "Log in to analyse a video. A free account is all it takes.", reason="login_required"
+    )
+
+
 async def _analysis_plan(request: Request) -> tuple:
     """(plan, user id when Pro, session) for whoever is asking.
 
-    Visitors with no session cookie cost nothing to check. A Supabase outage
-    analyses as free rather than failing: the visitor asked for an analysis,
-    not a sign-in.
+    Once accounts are on, analysing needs a signed-in visitor: the plan is
+    None for anyone else. Visitors with no session cookie cost nothing to
+    check. A Supabase outage raises its AuthError rather than letting through
+    a cookie nobody could check.
     """
-    if not AUTH_ENABLED or not (
-        request.cookies.get(ACCESS_COOKIE) or request.cookies.get(REFRESH_COOKIE)
-    ):
+    if not AUTH_ENABLED:
         return "free", None, None
-    try:
-        session = await _current_session(request)
-    except AuthError as exc:
-        log.warning("Could not read the session for an analysis (status %s); analysing as free.", exc.status_code)
-        return "free", None, None
+    if not _has_session_cookie(request):
+        return None, None, None
+    session = await _current_session(request)
+    if not _signed_in(session):
+        return None, None, session
     plan = _plan_for(session.user)
     user_id = session.user.get("id") if plan == PLAN_NAME and session.user else None
     return plan, user_id, session
@@ -3594,7 +3647,15 @@ def _claims_found(value: Any, checked: int) -> Optional[int]:
 
 @app.post("/api/analyze", response_model=AnalyzeResponse)
 async def analyze(req: AnalyzeRequest, request: Request):
-    plan, user_id, session = await _analysis_plan(request)
+    try:
+        plan, user_id, session = await _analysis_plan(request)
+    except AuthError as exc:
+        return _error_json(exc)
+    if plan is None:
+        # Checked before anything is metered or fetched. An ended session's
+        # cookies are cleared on the way out.
+        response = _error_json(_login_required())
+        return _with_session(response, request, session) if session else response
     try:
         result = await _run_analysis(req, request, plan, user_id)
         response: Response = JSONResponse(result.model_dump())

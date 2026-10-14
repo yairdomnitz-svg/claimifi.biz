@@ -635,3 +635,112 @@ def test_the_password_ceiling_counts_bytes_not_characters(auth):
     assert r.status_code == 422 and r.json()["reason"] == "weak_password"
     assert not [x for x in fake.calls if x["path"] == "/signup"]
     assert c.post("/api/auth/signup", json={"email": "ada@example.com", "password": "é" * 36}).status_code == 200
+
+
+# --------------------------------------------------------------------------
+# The analyzer is for signed-in visitors once accounts are on
+# --------------------------------------------------------------------------
+TITLE = {"title": "The Fall of the Roman Empire"}
+
+
+@pytest.fixture
+def analyzer(auth, monkeypatch):
+    """Accounts on, analysis live, Grok stubbed and counted."""
+    from unittest.mock import AsyncMock
+
+    def _make(**env):
+        module, c, fake = auth(XAI_API_KEY="k", ANALYSIS_ENABLED=1, RATE_LIMIT_REQUESTS=0,
+                               GLOBAL_RATE_LIMIT_REQUESTS=0, **env)
+        grok = AsyncMock(return_value={"claims": [], "claims_found": 0,
+                                       "overall_assessment": "Fine.", "sources_used": []})
+        monkeypatch.setattr(module, "call_grok", grok)
+        return module, c, fake, grok
+
+    return _make
+
+
+def test_the_analyzer_stays_open_while_accounts_are_off(client):
+    _, c = client()
+    r = c.get("/app", follow_redirects=False)
+    assert r.status_code == 200
+    assert "/app" in c.get("/sitemap.xml").text
+
+
+def test_a_signed_out_visitor_is_sent_to_log_in_and_back(analyzer):
+    _, c, fake, _ = analyzer()
+    r = c.get("/app", follow_redirects=False)
+    assert r.status_code == 303
+    assert r.headers["location"] == "/login?next=/app"
+    assert r.headers["cache-control"] == "no-store"
+    r = c.get("/app?q=rome%20fell", follow_redirects=False)
+    assert r.headers["location"] == "/login?next=/app%3Fq%3Drome%2520fell"
+    assert fake.calls == []
+    assert c.head("/app", follow_redirects=False).status_code == 303
+    assert "/app" not in c.get("/sitemap.xml").text
+
+
+def test_a_signed_in_visitor_gets_the_analyzer_unstored(analyzer):
+    _, c, fake, _ = analyzer()
+    fake.on("GET", "/user", body=USER)
+    r = c.get("/app", headers=sent(jwt()), follow_redirects=False)
+    assert r.status_code == 200
+    assert 'id="navAccount"' in r.text
+    assert r.headers["cache-control"] == "no-store"
+
+
+def test_an_ended_session_is_cleared_and_sent_to_log_in(analyzer):
+    _, c, fake, _ = analyzer()
+    fake.on("POST", "/token?refresh_token", status=400, body={"code": "refresh_token_not_found"})
+    r = c.get("/app", headers=sent(jwt(exp_in=-10), "rt-old"), follow_redirects=False)
+    assert r.status_code == 303
+    assert r.headers["location"] == "/login?next=/app"
+    assert written(r.headers, "claimifi_refresh") == '""'
+
+
+def test_a_refreshed_session_reaches_the_browser_with_the_page(analyzer):
+    _, c, fake, _ = analyzer()
+    fake.on("POST", "/token?refresh_token", body=session(refresh="rt-2"))
+    r = c.get("/app", headers=sent(jwt(exp_in=-10), "rt-1"), follow_redirects=False)
+    assert r.status_code == 200
+    assert written(r.headers, "claimifi_refresh") == "rt-2"
+
+
+def test_an_account_service_outage_still_opens_the_page(analyzer):
+    _, c, fake, _ = analyzer()
+    fake.on("GET", "/user", status=500, body={"msg": "down"})
+    r = c.get("/app", headers=sent(jwt()), follow_redirects=False)
+    assert r.status_code == 200
+
+
+def test_analysis_needs_a_signed_in_visitor(analyzer):
+    _, c, _, grok = analyzer()
+    r = c.post("/api/analyze", json=TITLE)
+    assert r.status_code == 401
+    assert r.json()["reason"] == "login_required"
+    grok.assert_not_called()
+
+
+def test_analysis_runs_for_a_signed_in_visitor(analyzer):
+    _, c, fake, grok = analyzer()
+    fake.on("GET", "/user", body=USER)
+    r = c.post("/api/analyze", json=TITLE, headers=sent(jwt()))
+    assert r.status_code == 200
+    grok.assert_called_once()
+
+
+def test_analysis_with_an_ended_session_is_refused_and_cleared(analyzer):
+    _, c, fake, grok = analyzer()
+    fake.on("POST", "/token?refresh_token", status=400, body={"code": "refresh_token_not_found"})
+    r = c.post("/api/analyze", json=TITLE, headers=sent(jwt(exp_in=-10), "rt-old"))
+    assert r.status_code == 401
+    assert r.json()["reason"] == "login_required"
+    assert written(r.headers, "claimifi_refresh") == '""'
+    grok.assert_not_called()
+
+
+def test_analysis_during_an_account_outage_is_refused_not_waved_through(analyzer):
+    _, c, fake, grok = analyzer()
+    fake.on("GET", "/user", status=500, body={"msg": "down"})
+    r = c.post("/api/analyze", json=TITLE, headers=sent(jwt()))
+    assert r.status_code == 502
+    grok.assert_not_called()

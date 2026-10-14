@@ -711,6 +711,13 @@
       // A non-JSON body is normal for an error served by an edge proxy rather
       // than by this app, so parse defensively and fall back to the status.
       return res.json().catch(function () { return {}; }).then(function (err) {
+        if (res.status === 401 && err.reason === 'login_required') {
+          // Signed out since the page loaded (or the session ended): log in
+          // and come straight back here.
+          window.location.href = '/login?next=' +
+            encodeURIComponent(window.location.pathname + window.location.search);
+          return;
+        }
         if (res.status === 503 && err.reason === 'analysis_disabled') {
           // Switched off since the page loaded. Fabricating a sample verdict
           // here would be indistinguishable from a real one, on a page whose

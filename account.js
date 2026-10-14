@@ -296,6 +296,9 @@
       if (next && next.indexOf('/pricing') === 0 && !msg.textContent) {
         say(msg, 'info', 'Log in or create an account to subscribe to Pro.');
       }
+      if (next && /^\/app(?:[?#]|$)/.test(next) && !msg.textContent) {
+        say(msg, 'info', 'Log in or create a free account to use the analyzer.');
+      }
       if (window.location.hash === '#forgot') show('forgot');
       else if (window.location.hash === '#signup') show('signup');
     });
