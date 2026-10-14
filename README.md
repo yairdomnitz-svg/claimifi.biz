@@ -180,6 +180,27 @@ To connect Supabase:
    it sends about **2 emails an hour** for the whole project, which a few sign-ups and
    password resets use up.
 
+**Continue with Google (optional).** The button appears on `/login` only once Google is
+switched on in Supabase; the server checks every five minutes and renders the page with
+it or without it, so nothing shifts as the page loads.
+
+1. In Google Cloud Console, create an OAuth client (**APIs & Services → Credentials →
+   Create credentials → OAuth client ID**, type *Web application*). Under **Authorized
+   redirect URIs** add `https://<project-ref>.supabase.co/auth/v1/callback`, the callback
+   Supabase shows on its Google provider page. Fill in the OAuth consent screen (app name,
+   support email, and both `claimifi.biz` and `<project-ref>.supabase.co` as authorised
+   domains) and publish it.
+2. In Supabase, **Authentication → Sign In / Providers → Google**: switch it on and paste
+   the client ID and secret.
+
+Nothing changes in Railway. Sign-in uses PKCE: Google comes back to `/auth/callback` with a
+code, which the server swaps for the session, so no token passes through the address bar.
+A Google account has no password, so a Google sign-in within the last hour stands in for
+one when setting a password or deleting the account; after that the profile asks the
+visitor to sign in with Google again. That re-check has to come back as the same account:
+a different Google account is signed straight out again, and the profile says so. Once a
+Google account sets a password, `app_metadata.password_set` records it.
+
 New projects require email confirmation, so an account cannot log in until its link is
 opened. Supabase's default email templates work unchanged. To keep links on this site's
 own domain instead, point the templates at `/auth/confirm`:
@@ -196,13 +217,19 @@ Passwords need at least 8 characters, plus whatever stricter rules are set in Su
 - `/auth/callback` — Supabase's default templates arrive here with the new session in
   the URL fragment (`#access_token=…&refresh_token=…&type=recovery`). Remove it from the
   address bar, then `POST` both tokens to `/api/auth/session`, which checks them with
-  Supabase and sets the cookies. A failed link arrives with `error_code` in the fragment,
-  or in the query when it came through `/auth/confirm`.
+  Supabase. It sets the cookies at once only in the browser that asked for the link
+  (sign-up, resend, reset and email change leave a signed `claimifi_pending` cookie for
+  a day). Anywhere else it answers `{"status": "confirm", "email"}`, and the page asks
+  "Continue as …?" first, then posts again with `"confirm": true`: a link can be anyone's,
+  and an attacker's own would otherwise sign the visitor in to the attacker's account.
+  `/auth/confirm` hands such a link to this page the same way. A failed link arrives with
+  `error_code` in the fragment, or in the query when it came through `/auth/confirm`.
 - `/reset-password` — where a reset link ends up, signed in: `POST /api/auth/password`.
   For its first hour a session opened by an email link may set a password without the
   current one (Supabase marks it `amr: otp`); any other session sends `current_password`.
-- `/profile` — where a confirmation link ends up (`?welcome=1`). Signed out, it sends the
-  visitor to `/login?next=…` and back. `/login` sends a signed-in visitor on to `/profile`.
+- `/profile` — where a confirmation link ends up (`?welcome=1`), unless the sign-up
+  started from `/login?next=…`: then it goes back there. Signed out, it sends the visitor
+  to `/login?next=…` and back. `/login` sends a signed-in visitor on to `/profile`.
 - `/account` — the old single account page; it redirects (308) to `/profile`, keeping the query.
 
 Every `POST` takes JSON, from the site's own origin. Errors carry a string `detail` to
@@ -257,8 +284,12 @@ To connect Stripe:
    `GET /health` should report `billing_configured: true`.
 
 Locally, run `stripe listen --forward-to localhost:8000/api/stripe/webhook` and use the
-`whsec_...` it prints. Checkout comes back to `/profile?checkout=success`, and a cancelled
-checkout to `/pricing?checkout=cancelled`.
+`whsec_...` it prints. Checkout comes back to `/profile?checkout=success`, a cancelled
+checkout to `/pricing?checkout=cancelled`, and the Customer Portal to `/profile?portal=1`.
+On both returns the profile calls `POST /api/billing/sync`, which reads the subscription
+from Stripe at once instead of waiting for the webhook, so a late or failing webhook
+cannot leave a customer who has paid on Free, or show a plan as it was before a change
+made in the portal.
 
 Starting a checkout first expires any checkout the customer still has open, so two tabs
 (or a monthly and a yearly click) cannot both be paid and leave two subscriptions.
@@ -274,17 +305,19 @@ Starting a checkout first expires any checkout the customer still has open, so t
 | `GET /api/config` | Tells the frontend whether live analysis is available |
 | `POST /api/analyze` | `{"url": "..."}` (max 2000 chars) or `{"title": "..."}` (3–300 chars) |
 | `GET /api/auth/me` | Whether accounts are on, and who is signed in |
-| `POST /api/auth/signup` | `{"email", "password"}`; sends the confirmation email |
+| `POST /api/auth/signup` | `{"email", "password", "next"}`; sends the confirmation email |
 | `POST /api/auth/login` | `{"email", "password"}`; sets the session cookies |
 | `POST /api/auth/logout` | Ends the session in this browser |
 | `POST /api/auth/forgot-password` | `{"email"}`; sends a reset link, with the same reply whether or not the account exists |
 | `POST /api/auth/password` | `{"password", "current_password"}`; sets a new password for whoever is signed in |
 | `POST /api/auth/delete` | `{"password"}`; deletes the account, once any renewing plan is cancelled |
 | `POST /api/auth/resend` | `{"email"}`; sends the confirmation email again |
-| `POST /api/auth/session`, `GET /auth/confirm` | Turn an email link into a session |
+| `POST /api/auth/session`, `GET /auth/confirm` | Turn an email link into a session (see *The account pages*) |
+| `GET /auth/google`, `GET /auth/callback?code=…` | Continue with Google: start the PKCE sign-in, and finish it |
 | `GET /api/billing/status` | Whether payments are on, the prices from Stripe, and the signed-in user's plan |
 | `POST /api/billing/checkout` | `{"interval": "monthly" \| "yearly"}`; answers `{"url"}` for Stripe Checkout |
-| `POST /api/billing/portal` | Answers `{"url"}` for the Stripe Customer Portal |
+| `POST /api/billing/portal` | Answers `{"url"}` for the Stripe Customer Portal, after copying the account's email to the Stripe customer |
+| `POST /api/billing/sync` | Reads the signed-in user's subscription from Stripe now and answers the plan; at most 3 times in 10 seconds per user |
 | `POST /api/stripe/webhook` | Stripe's notifications, signature-checked |
 | `GET /robots.txt`, `/sitemap.xml` | SEO |
 

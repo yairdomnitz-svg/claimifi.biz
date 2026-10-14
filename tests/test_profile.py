@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import pytest
 
-from test_auth import SUPABASE, FakeSupabase, jwt, sent
+from test_auth import SUPABASE, FakeSupabase, jwt, pending_note, sent, written
 from test_billing import USER_ID, FakeStripe, PRICES, WHSEC, event, signed, subscription, user
 
 
@@ -46,7 +46,8 @@ def test_me_returns_the_profile(acct):
     supa.on("GET", "/user", body=u)
     body = c.get("/api/auth/me", headers=signed_in()).json()
     assert body["user"] == {"email": "ada@example.com", "created_at": u["created_at"],
-                            "display_name": "Ada", "new_email": "ada@new.example"}
+                            "display_name": "Ada", "new_email": "ada@new.example",
+                            "google": False, "has_password": True, "recent_sign_in": False}
 
 
 # --------------------------------------------------------------------------
@@ -80,7 +81,7 @@ def test_profile_changes_from_another_site_are_refused(acct):
 
 
 def test_an_email_change_sends_a_confirmation_link(acct):
-    _, c, supa, _ = acct()
+    module, c, supa, _ = acct()
     supa.on("GET", "/user", body=user())
     supa.on("PUT", "/user", body=user())
     r = c.post("/api/auth/email", json={"email": "ada@new.example"}, headers=signed_in())
@@ -88,6 +89,8 @@ def test_an_email_change_sends_a_confirmation_link(acct):
     call = supa.last("PUT", "/user")
     assert call["json"] == {"email": "ada@new.example"}
     assert call["params"] == {"redirect_to": "https://claimifi.biz/auth/callback"}
+    # The link for the new address signs in here without the "Continue as" step.
+    assert written(r.headers, "claimifi_pending") == pending_note(module, "ada@new.example")
 
 
 def test_the_same_email_is_refused(acct):
@@ -98,11 +101,35 @@ def test_the_same_email_is_refused(acct):
 
 
 def test_an_email_change_link_lands_on_the_account_page(acct):
-    _, c, supa, _ = acct()
+    module, c, supa, _ = acct()
     supa.on("POST", "/verify", body={"access_token": jwt(), "refresh_token": "rt-9", "expires_in": 3600, "user": user()})
-    r = c.get("/auth/confirm?token_hash=abc&type=email_change", follow_redirects=False)
+    r = c.get("/auth/confirm?token_hash=abc&type=email_change", follow_redirects=False,
+              headers={"Cookie": f"claimifi_pending={pending_note(module)}"})
     assert r.status_code == 303
     assert r.headers["location"] == "/profile?email_changed=1"
+
+
+def test_a_finished_email_change_moves_the_stripe_customer_too(acct):
+    """Receipts, renewal notices and failed-payment emails go to the Stripe
+    customer's address, which stayed the old one after an email change."""
+    module, c, supa, stripe = acct()
+    changed = {**user(PRO), "email": "ada@new.example"}
+    supa.on("POST", "/verify", body={"access_token": jwt(), "refresh_token": "rt-9", "expires_in": 3600, "user": changed})
+    stripe.on("POST", "/customers/cus_1", body={"id": "cus_1"})
+    c.get("/auth/confirm?token_hash=abc&type=email_change", follow_redirects=False,
+          headers={"Cookie": f"claimifi_pending={pending_note(module, 'ada@new.example')}"})
+    assert stripe.last("POST", "/customers/cus_1")["data"] == {"email": "ada@new.example"}
+
+
+def test_a_stripe_hiccup_does_not_undo_an_email_change(acct):
+    module, c, supa, stripe = acct()
+    changed = {**user(PRO), "email": "ada@new.example"}
+    supa.on("POST", "/verify", body={"access_token": jwt(), "refresh_token": "rt-9", "expires_in": 3600, "user": changed})
+    stripe.on("POST", "/customers/cus_1", status=500, body={"error": {"type": "api_error"}})
+    r = c.get("/auth/confirm?token_hash=abc&type=email_change", follow_redirects=False,
+              headers={"Cookie": f"claimifi_pending={pending_note(module, 'ada@new.example')}"})
+    assert r.headers["location"] == "/profile?email_changed=1"
+    assert written(r.headers, "claimifi_refresh") == "rt-9"
 
 
 # --------------------------------------------------------------------------
@@ -239,11 +266,13 @@ def test_a_stripe_customer_that_is_already_gone_does_not_block_deletion(acct):
 
 def test_an_email_change_to_a_taken_address_reads_like_any_other(acct):
     """Sign-up never says whether an address has an account; neither does this."""
-    _, c, supa, _ = acct()
+    module, c, supa, _ = acct()
     supa.on("GET", "/user", body=user())
     supa.on("PUT", "/user", status=422, body={"code": "email_exists", "msg": "A user with this email address has already been registered"})
     r = c.post("/api/auth/email", json={"email": "someone@else.example"}, headers=signed_in())
     assert r.status_code == 200 and r.json() == {"status": "confirmation_sent"}
+    # The same cookie as a real change, so the headers give nothing away either.
+    assert written(r.headers, "claimifi_pending") == pending_note(module, "someone@else.example")
 
 
 def test_the_first_of_two_email_change_links_is_not_called_expired(acct):

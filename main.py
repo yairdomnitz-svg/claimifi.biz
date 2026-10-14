@@ -28,6 +28,7 @@ import logging
 import math
 import os
 import re
+import secrets
 import time
 import unicodedata
 from collections import OrderedDict, deque
@@ -35,7 +36,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, unquote, urlencode
 from typing import Any, Deque, Dict, List, Optional
 
 import httpx
@@ -2125,9 +2126,19 @@ def _auth_failure(status: int, body: Any) -> AuthError:
         http_status, message = _AUTH_MESSAGES[code]
         return AuthError(http_status, message, reason=code)
     if code in _SESSION_OVER:
-        return AuthError(401, "Your session has ended. Log in again.", reason="session_expired")
+        # user_not_found keeps its own reason: from an admin lookup it means the
+        # account is gone, which the webhook acts on.
+        reason = "user_not_found" if code == "user_not_found" else "session_expired"
+        return AuthError(401, "Your session has ended. Log in again.", reason=reason)
     raw = body.get("msg") or body.get("message") or body.get("error_description") or body.get("error")
     message = _clean_text(raw, 300) if isinstance(raw, str) else ""
+    if code is None and status in (401, 403) and "api key" in message.lower():
+        # Supabase's gateway refusing this server's own key ("Invalid API key"),
+        # not GoTrue refusing the visitor. Read as "session over" it signed every
+        # visitor out, and read as "user deleted" it had webhooks answered 200
+        # with nothing written, so Stripe never retried them.
+        log.error("Supabase refused the server's API key (status %s): check SUPABASE_SECRET_KEY.", status)
+        return AuthError(502, "The account service had a problem. Please try again.", reason="auth_misconfigured")
     if status >= 500:
         log.error("Supabase Auth failed: status=%s code=%s msg=%s", status, code, message)
         return AuthError(502, "The account service had a problem. Please try again.")
@@ -2258,11 +2269,15 @@ def _public_user(user: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     if not user:
         return None
     meta = user.get("user_metadata") if isinstance(user.get("user_metadata"), dict) else {}
-    name = meta.get("display_name")
+    # The name saved on the profile, or else the one Google sent with the account.
+    name = next(
+        (meta[key] for key in ("display_name", "full_name", "name") if isinstance(meta.get(key), str) and meta[key].strip()),
+        "",
+    )
     return {
         "email": user.get("email"),
         "created_at": user.get("created_at"),
-        "display_name": name if isinstance(name, str) else "",
+        "display_name": _clean_text(name, 80).replace("\n", " ") if name else "",
         # Set while an email change waits for its confirmation link.
         "new_email": user.get("new_email") or None,
     }
@@ -2295,6 +2310,60 @@ def _clear_session(response: Response, request: Request) -> None:
         response.delete_cookie(name, path="/", secure=secure, httponly=True, samesite="lax")
 
 
+# A note, kept in this browser, that it asked for an email link: a sign-up,
+# reset or email change, for one address. A link opened in the browser that
+# asked for it signs straight in. Opened anywhere else, the callback page asks
+# "Continue as ...?" first, because a link can be anyone's: an attacker can
+# send their own, and the visitor would be signed in to the attacker's account.
+# The note also carries where the visitor was going, for after the sign-up.
+# Signed with a key derived from the Supabase secret, so it cannot be forged.
+PENDING_COOKIE = "claimifi_pending"
+PENDING_SECONDS = 86_400
+
+
+def _pending_key() -> bytes:
+    return hashlib.sha256(b"claimifi-pending-link:" + SUPABASE_SECRET_KEY.encode()).digest()
+
+
+def _email_tag(email: str) -> str:
+    return hmac.new(_pending_key(), email.strip().lower().encode(), hashlib.sha256).hexdigest()[:32]
+
+
+def _set_pending(response: Response, request: Request, email: str, next_path: str = "") -> None:
+    note = json.dumps({"e": _email_tag(email), "n": _safe_next(next_path) or ""}, separators=(",", ":"))
+    payload = base64.urlsafe_b64encode(note.encode()).rstrip(b"=").decode()
+    signature = hmac.new(_pending_key(), payload.encode(), hashlib.sha256).hexdigest()[:32]
+    response.set_cookie(
+        PENDING_COOKIE, f"{payload}.{signature}", max_age=PENDING_SECONDS, path="/",
+        secure=_request_is_https(request), httponly=True, samesite="lax",
+    )
+
+
+def _clear_pending(response: Response, request: Request) -> None:
+    response.delete_cookie(PENDING_COOKIE, path="/", secure=_request_is_https(request), httponly=True, samesite="lax")
+
+
+def _pending(request: Request) -> Dict[str, str]:
+    payload, _, signature = request.cookies.get(PENDING_COOKIE, "").partition(".")
+    if not payload or not signature:
+        return {}
+    expected = hmac.new(_pending_key(), payload.encode(), hashlib.sha256).hexdigest()[:32]
+    if not hmac.compare_digest(signature, expected):
+        return {}
+    try:
+        note = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+    except (ValueError, TypeError):
+        return {}
+    return {k: v for k, v in note.items() if isinstance(v, str)} if isinstance(note, dict) else {}
+
+
+def _pending_matches(request: Request, user: Optional[Dict[str, Any]]) -> bool:
+    """Whether this browser asked for an email link for this user's address."""
+    tag = _pending(request).get("e")
+    email = (user or {}).get("email")
+    return bool(tag and isinstance(email, str) and hmac.compare_digest(tag, _email_tag(email)))
+
+
 def _token_claims(token: str) -> Dict[str, Any]:
     """An access token's payload, read without verifying it.
 
@@ -2318,15 +2387,17 @@ def _token_expiry(token: str) -> float:
 
 
 def _fresh_link_sign_in(token: str) -> bool:
-    """Whether this session was opened by an email link within the last hour.
+    """Whether this session was opened by an email link or Google within the last hour.
 
     Supabase lists how a session began in the token's `amr` claim, with the
-    time; a reset link, like every email link, begins one with method "otp".
+    time; a reset link, like every email link, begins one with method "otp",
+    and a Google sign-in with "oauth". Either proves who is asking as well as
+    a password would, and a Google account may not have a password at all.
     The time stays the original sign-in's when the session is refreshed.
     """
     now = time.time()
     for entry in _token_claims(token).get("amr") or []:
-        if not isinstance(entry, dict) or entry.get("method") not in ("otp", "recovery", "magiclink"):
+        if not isinstance(entry, dict) or entry.get("method") not in ("otp", "recovery", "magiclink", "oauth"):
             continue
         at = entry.get("timestamp")
         if isinstance(at, (int, float)) and 0 <= now - at <= LINK_SIGN_IN_FRESH_SECONDS:
@@ -2451,10 +2522,13 @@ class LoginBody(BaseModel):
 class SignupBody(BaseModel):
     email: str = Field(max_length=320)
     password: str = Field(max_length=1024)
+    # Where the visitor was going, for after the confirmation link.
+    next: str = Field(default="", max_length=600)
 
 
 class EmailBody(BaseModel):
     email: str = Field(max_length=320)
+    next: str = Field(default="", max_length=600)
 
 
 class PasswordBody(BaseModel):
@@ -2466,6 +2540,36 @@ class PasswordBody(BaseModel):
 class LinkSessionBody(BaseModel):
     access_token: str = Field(min_length=20, max_length=8192)
     refresh_token: str = Field(min_length=1, max_length=2048)
+    # The visitor pressed "Continue as ..." for a link this browser didn't ask for.
+    confirm: bool = False
+    # The link's type from the URL fragment, as Supabase wrote it.
+    type: str = Field(default="", max_length=32)
+
+
+def _providers(user: Dict[str, Any]) -> List[str]:
+    meta = user.get("app_metadata") if isinstance(user.get("app_metadata"), dict) else {}
+    providers = meta.get("providers")
+    return [p for p in providers if isinstance(p, str)] if isinstance(providers, list) else []
+
+
+def _has_password(user: Dict[str, Any]) -> bool:
+    """Whether the account has a password to type. A Google-first account has
+    none until it sets one, and setting one adds no "email" provider, so that is
+    recorded separately as password_set."""
+    providers = _providers(user)
+    meta = user.get("app_metadata") if isinstance(user.get("app_metadata"), dict) else {}
+    return not providers or "email" in providers or meta.get("password_set") is True
+
+
+async def _signed_in_user(request: Request) -> Optional[Dict[str, Any]]:
+    """Who this browser is signed in as already, from its access cookie, if anyone."""
+    access = request.cookies.get(ACCESS_COOKIE, "")
+    if not access:
+        return None
+    try:
+        return await _user_for(request, access)
+    except AuthError:
+        return None
 
 
 @app.get("/api/auth/me")
@@ -2474,7 +2578,15 @@ async def auth_me(request: Request):
     if not AUTH_ENABLED:
         return JSONResponse({"enabled": False, "user": None}, headers=NO_STORE)
     session = await _current_session(request)
-    response = JSONResponse({"enabled": True, "user": _public_user(session.user)}, headers=NO_STORE)
+    user = _public_user(session.user)
+    if user is not None:
+        # What the profile page asks for before a password change or a
+        # deletion: nothing after a recent link or Google sign-in, and a fresh
+        # Google sign-in for an account that has no password to type.
+        user["google"] = "google" in _providers(session.user)
+        user["has_password"] = _has_password(session.user)
+        user["recent_sign_in"] = bool(session.token and _fresh_link_sign_in(session.token))
+    response = JSONResponse({"enabled": True, "user": user}, headers=NO_STORE)
     return _with_session(response, request, session)
 
 
@@ -2501,7 +2613,9 @@ async def auth_signup(req: SignupBody, request: Request):
     # The usual case: a confirmation email is on its way. Supabase answers an
     # address that already has an account in exactly the same way, so this reply
     # cannot be used to find out who has signed up.
-    return JSONResponse({"status": "confirmation_sent"}, headers=NO_STORE)
+    response = JSONResponse({"status": "confirmation_sent"}, headers=NO_STORE)
+    _set_pending(response, request, email, req.next)
+    return response
 
 
 @app.post("/api/auth/login")
@@ -2539,7 +2653,9 @@ async def auth_resend_confirmation(req: EmailBody, request: Request):
         params={"redirect_to": _link_target()},
         body={"type": "signup", "email": email},
     )
-    return JSONResponse({"status": "sent"}, headers=NO_STORE)
+    response = JSONResponse({"status": "sent"}, headers=NO_STORE)
+    _set_pending(response, request, email, req.next)
+    return response
 
 
 @app.post("/api/auth/forgot-password")
@@ -2555,7 +2671,9 @@ async def auth_forgot_password(req: EmailBody, request: Request):
         body={"email": email},
     )
     # Supabase answers the same whether or not the address has an account.
-    return JSONResponse({"status": "sent"}, headers=NO_STORE)
+    response = JSONResponse({"status": "sent"}, headers=NO_STORE)
+    _set_pending(response, request, email)
+    return response
 
 
 async def _check_password(request: Request, user: Dict[str, Any], password: str, wrong: str) -> None:
@@ -2600,6 +2718,16 @@ async def auth_change_password(req: PasswordBody, request: Request):
         await _auth_call(request, "PUT", "/user", body={"password": password}, token=session.token)
     except AuthError as exc:
         return _with_session(_error_json(exc), request, session)
+    if not _has_password(session.user):
+        # A Google-first account now has a password too. Without this note the
+        # profile kept treating it as password-less, and asked for Google instead.
+        try:
+            await _auth_call(
+                request, "PUT", f"/admin/users/{session.user['id']}", body={"app_metadata": {"password_set": True}}
+            )
+            _forget_user(session.user["id"])
+        except AuthError as exc:
+            log.warning("Could not record that user %s set a password (%s).", session.user["id"], exc.reason)
     return _with_session(JSONResponse({"status": "updated"}, headers=NO_STORE), request, session)
 
 
@@ -2608,7 +2736,7 @@ class ProfileBody(BaseModel):
 
 
 class DeleteAccountBody(BaseModel):
-    password: str = Field(max_length=1024)
+    password: str = Field(default="", max_length=1024)
 
 
 DISPLAY_NAME_MAX = 80
@@ -2665,16 +2793,15 @@ async def auth_change_email(req: EmailBody, request: Request):
         # Sign-up never says whether an address has an account, and neither does
         # this: any signed-in visitor could otherwise test addresses one by one.
         # No email goes out, and the change simply never completes.
-        if exc.reason in ("email_exists", "user_already_exists"):
-            log.info("Email change to an address that already has an account; answered as sent.")
-            return _with_session(
-                JSONResponse({"status": "confirmation_sent"}, headers=NO_STORE), request, session
-            )
-        return _with_session(_error_json(exc), request, session)
-    _forget_user(session.user["id"])
-    return _with_session(
-        JSONResponse({"status": "confirmation_sent"}, headers=NO_STORE), request, session
-    )
+        if exc.reason not in ("email_exists", "user_already_exists"):
+            return _with_session(_error_json(exc), request, session)
+        log.info("Email change to an address that already has an account; answered as sent.")
+    else:
+        _forget_user(session.user["id"])
+    response = JSONResponse({"status": "confirmation_sent"}, headers=NO_STORE)
+    # Both answers carry the note, so its presence says nothing either.
+    _set_pending(response, request, email)
+    return _with_session(response, request, session)
 
 
 def _renews(user: Optional[Dict[str, Any]]) -> bool:
@@ -2725,7 +2852,8 @@ async def auth_delete_account(req: DeleteAccountBody, request: Request):
     """Erase the signed-in account: subscription, Stripe customer and Supabase user.
 
     The password is asked for again, so a session left open on a shared
-    computer is not enough to delete someone's account. A subscription that
+    computer is not enough to delete someone's account; a link or Google
+    sign-in within the last hour counts instead. A subscription that
     still renews has to be cancelled first: the account page says so in a
     dialog, and this refuses it too, so the rule holds without the page.
     """
@@ -2741,9 +2869,10 @@ async def auth_delete_account(req: DeleteAccountBody, request: Request):
                 "Cancel your Pro subscription before deleting your account.",
                 reason="active_subscription",
             )
-        if not req.password:
-            raise AuthError(400, "Enter your password to confirm.", reason="validation_failed")
-        await _check_password(request, user, req.password, "That password isn't right.")
+        if not _fresh_link_sign_in(session.token):
+            if not req.password:
+                raise AuthError(400, "Enter your password to confirm.", reason="validation_failed")
+            await _check_password(request, user, req.password, "That password isn't right.")
         await _close_billing_for_deletion(user)
         await _auth_call(request, "DELETE", f"/admin/users/{user['id']}")
     except AuthError as exc:
@@ -2787,7 +2916,8 @@ async def auth_session_from_link(req: LinkSessionBody, request: Request):
     which redirects to AUTH_CALLBACK_PATH with the new session in the URL
     fragment. A fragment never reaches a server, so the page there has to post
     it here, and the access token is checked with Supabase before any cookie is
-    written.
+    written. Cookies are written straight away only in the browser that asked
+    for the link (see PENDING_COOKIE); anywhere else, after "Continue as ...".
     """
     _require_auth(request)
     user = await _user_for(request, req.access_token)
@@ -2795,13 +2925,176 @@ async def auth_session_from_link(req: LinkSessionBody, request: Request):
         raise AuthError(
             401, "This link has expired or has already been used. Request a new one.", reason="otp_expired"
         )
+    current = await _signed_in_user(request)
+    asked_here = _pending_matches(request, user)
+    if not (asked_here or req.confirm or (current and current.get("id") == user.get("id"))):
+        # A link this browser didn't ask for. It may be the visitor's own, opened
+        # on another device, or an attacker's, sent to sign the visitor in to the
+        # attacker's account. Name the account and let the visitor decide.
+        return JSONResponse(
+            {"status": "confirm", "email": user.get("email"), "signed_in_as": (current or {}).get("email")},
+            headers=NO_STORE,
+        )
+    next_path = (_safe_next(_pending(request).get("n", "")) if asked_here else None) or ""
     lifetime = int(_token_expiry(req.access_token) - time.time())
-    response = JSONResponse({"user": _public_user(user)}, headers=NO_STORE)
+    response = JSONResponse(
+        {"status": "signed_in", "user": _public_user(user), "next": next_path}, headers=NO_STORE
+    )
     _set_session(
         response,
         request,
         {"access_token": req.access_token, "refresh_token": req.refresh_token, "expires_in": lifetime},
     )
+    _clear_pending(response, request)
+    if req.type == "email_change":
+        await _sync_customer_email(user)
+    return response
+
+
+# ---------------------------------------------------------------------------
+# Continue with Google (Supabase OAuth, PKCE)
+# ---------------------------------------------------------------------------
+# The visitor goes to Supabase, on to Google, and comes back to
+# AUTH_CALLBACK_PATH with a one-time code, which this server swaps for a
+# session. The code is useless without the verifier kept here in an HttpOnly
+# cookie, and no token ever passes through the address bar. Google is offered
+# only while it is switched on in the Supabase project.
+OAUTH_VERIFIER_COOKIE = "claimifi_oauth"
+OAUTH_NEXT_COOKIE = "claimifi_oauth_next"
+# Set when a signed-in visitor re-checks with Google: the account they are
+# signed in as, which the Google sign-in has to come back as.
+OAUTH_FOR_COOKIE = "claimifi_oauth_for"
+OAUTH_COOKIE_SECONDS = 600
+PROVIDERS_CACHE_SECONDS = 300
+_providers_cache: Dict[str, Any] = {"at": None, "google": False}
+
+
+async def _google_enabled(request: Request) -> bool:
+    """Whether the Supabase project has Google switched on, checked every few minutes."""
+    if not AUTH_ENABLED:
+        return False
+    at = _providers_cache["at"]
+    if at is not None and time.monotonic() - at < PROVIDERS_CACHE_SECONDS:
+        return _providers_cache["google"]
+    try:
+        settings = await _auth_call(request, "GET", "/settings")
+    except AuthError as exc:
+        log.warning("Could not read the Supabase sign-in settings (status %s).", exc.status_code)
+        return _providers_cache["google"]
+    external = settings.get("external") if isinstance(settings.get("external"), dict) else {}
+    _providers_cache.update(at=time.monotonic(), google=external.get("google") is True)
+    return _providers_cache["google"]
+
+
+def _oauth_cookie(response: Response, request: Request, name: str, value: Optional[str]) -> None:
+    secure = _request_is_https(request)
+    if value is None:
+        response.delete_cookie(name, path=AUTH_CALLBACK_PATH, secure=secure, httponly=True, samesite="lax")
+    else:
+        response.set_cookie(
+            name, value, max_age=OAUTH_COOKIE_SECONDS, path=AUTH_CALLBACK_PATH,
+            secure=secure, httponly=True, samesite="lax",
+        )
+
+
+@app.get("/auth/google", include_in_schema=False)
+async def auth_google(request: Request, next_path: str = Query("", alias="next")):
+    if not AUTH_ENABLED:
+        raise HTTPException(status_code=404, detail="Not found.")
+    session = None
+    if _has_session_cookie(request):
+        try:
+            session = await _current_session(request)
+        except AuthError:
+            session = None
+    current = session.user if session else None
+    if not await _google_enabled(request):
+        target = f"{AUTH_ACCOUNT_PATH if current else AUTH_LOGIN_PATH}?google_error=unavailable"
+        response = RedirectResponse(target, status_code=303, headers=NO_STORE)
+        return _with_session(response, request, session) if session else response
+    verifier = secrets.token_urlsafe(64)
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+    params = [
+        ("provider", "google"),
+        ("redirect_to", _link_target()),
+        ("code_challenge", challenge),
+        ("code_challenge_method", "s256"),
+    ]
+    if current:
+        # A re-check from the profile: make Google ask which account, and
+        # suggest the one this profile belongs to. Supabase passes both on.
+        params.append(("prompt", "select_account"))
+        if isinstance(current.get("email"), str):
+            params.append(("login_hint", current["email"]))
+    response = RedirectResponse(
+        f"{SUPABASE_URL}/auth/v1/authorize?{urlencode(params)}", status_code=303, headers=NO_STORE
+    )
+    _oauth_cookie(response, request, OAUTH_VERIFIER_COOKIE, verifier)
+    _oauth_cookie(response, request, OAUTH_NEXT_COOKIE, quote(_safe_next(next_path) or "", safe="/"))
+    _oauth_cookie(response, request, OAUTH_FOR_COOKIE, current["id"] if current else None)
+    return _with_session(response, request, session) if session else response
+
+
+# Supabase's error codes for a Google sign-in that came back without a code,
+# as the login page words them.
+_GOOGLE_FAILURES = {"access_denied": "cancelled", "signup_disabled": "signup_disabled"}
+
+
+async def _google_return(request: Request) -> Response:
+    """Finish a Google sign-in that has come back to AUTH_CALLBACK_PATH."""
+    verifier = request.cookies.get(OAUTH_VERIFIER_COOKIE, "")
+    next_path = _safe_next(unquote(request.cookies.get(OAUTH_NEXT_COOKIE, "")))
+    expected_user = request.cookies.get(OAUTH_FOR_COOKIE, "")
+    code = request.query_params.get("code", "")
+    failure = request.query_params.get("error_code") or request.query_params.get("error")
+
+    def failed(reason: str) -> Response:
+        if expected_user:
+            # A re-check from the profile: the visitor is still signed in as
+            # before, so the profile says what happened. The log-in page would
+            # only forward a signed-in visitor straight back, saying nothing.
+            return RedirectResponse(f"{AUTH_ACCOUNT_PATH}?google_error={reason}", status_code=303, headers=NO_STORE)
+        back = f"&next={quote(next_path, safe='/')}" if next_path else ""
+        return RedirectResponse(f"{AUTH_LOGIN_PATH}?google_error={reason}{back}", status_code=303, headers=NO_STORE)
+
+    if failure or not code or len(code) > 512:
+        if failure:
+            log.info("Google sign-in came back with an error: %s", _clean_text(str(failure), 80))
+        response = failed(_GOOGLE_FAILURES.get(failure or "", "failed"))
+    else:
+        try:
+            data = await _auth_call(
+                request, "POST", "/token", params={"grant_type": "pkce"},
+                body={"auth_code": code, "code_verifier": verifier},
+            )
+        except AuthError as exc:
+            log.warning("Google sign-in code exchange failed (status %s, %s).", exc.status_code, exc.reason)
+            data = {}
+        user = data.get("user") if isinstance(data.get("user"), dict) else None
+        if _has_tokens(data) and expected_user and user is None:
+            try:
+                user = await _user_for(request, data["access_token"])
+            except AuthError:
+                user = None
+        if not _has_tokens(data):
+            response = failed("failed")
+        elif expected_user and (user or {}).get("id") != expected_user:
+            # The re-check came back as a different Google account. Going on
+            # would switch the profile to it, and "delete my account" would then
+            # delete the wrong one. Keep the session the visitor already has.
+            log.info("A Google re-check returned a different account; the current session is kept.")
+            try:
+                await _auth_call(request, "POST", "/logout", params={"scope": "local"}, token=data["access_token"])
+            except AuthError:
+                pass
+            response = failed("other_account")
+        else:
+            if user:
+                _remember_user(data["access_token"], user)
+            response = RedirectResponse(next_path or AUTH_ACCOUNT_PATH, status_code=303, headers=NO_STORE)
+            _set_session(response, request, data)
+    for name in (OAUTH_VERIFIER_COOKIE, OAUTH_NEXT_COOKIE, OAUTH_FOR_COOKIE):
+        _oauth_cookie(response, request, name, None)
     return response
 
 
@@ -2839,19 +3132,39 @@ async def auth_confirm(
             # The first one verifies and starts no session: that half worked.
             return RedirectResponse(f"{AUTH_ACCOUNT_PATH}?email_change=pending", status_code=303, headers=NO_STORE)
         return RedirectResponse(failed + "otp_expired", status_code=303)
-    if isinstance(data.get("user"), dict):
-        _remember_user(data["access_token"], data["user"])
+    user = data.get("user") if isinstance(data.get("user"), dict) else None
+    if user:
+        _remember_user(data["access_token"], user)
+
+    current = await _signed_in_user(request)
+    asked_here = _pending_matches(request, user)
+    if not (asked_here or (user and current and current.get("id") == user.get("id"))):
+        # Not the browser that asked for this link: the callback page names the
+        # account and signs in only after "Continue as ...". The session goes in
+        # the fragment, which no server sees, as Supabase's own links do.
+        fragment = urlencode({
+            "access_token": data["access_token"],
+            "refresh_token": data["refresh_token"],
+            "expires_in": data.get("expires_in") or 3600,
+            "token_type": "bearer",
+            "type": link_type,
+        })
+        return RedirectResponse(f"{AUTH_CALLBACK_PATH}#{fragment}", status_code=303, headers=NO_STORE)
 
     if link_type == "recovery":
         destination = AUTH_RESET_PATH
     elif link_type in ("signup", "email", "invite"):
-        destination = f"{AUTH_ACCOUNT_PATH}?welcome=1"
+        # Back to where the visitor was going when they signed up, if anywhere.
+        destination = (_safe_next(_pending(request).get("n", "")) if asked_here else None) or f"{AUTH_ACCOUNT_PATH}?welcome=1"
     elif link_type == "email_change":
         destination = f"{AUTH_ACCOUNT_PATH}?email_changed=1"
     else:
         destination = AUTH_ACCOUNT_PATH
     response = RedirectResponse(_safe_next(next_path) or destination, status_code=303, headers=NO_STORE)
     _set_session(response, request, data)
+    _clear_pending(response, request)
+    if link_type == "email_change" and user:
+        await _sync_customer_email(user)
     return response
 
 
@@ -3016,6 +3329,26 @@ async def _customer_for(request: Request, user: Dict[str, Any], replacing: Optio
     return customer_id
 
 
+async def _sync_customer_email(user: Optional[Dict[str, Any]]) -> None:
+    """Give the user's Stripe customer the account's current email.
+
+    Stripe sends receipts, renewal notices and failed-payment emails to the
+    customer's address, which was copied from the account at first checkout. An
+    email change used to leave it on the old one. Best effort: the account
+    change has happened either way.
+    """
+    customer_id = _billing(user).get("customer_id")
+    email = (user or {}).get("email")
+    if not (BILLING_ENABLED and isinstance(customer_id, str) and _STRIPE_ID_RE.match(customer_id)):
+        return
+    if not isinstance(email, str) or not email:
+        return
+    try:
+        await _stripe_call("POST", f"/customers/{customer_id}", data={"email": email})
+    except BillingError as exc:
+        log.warning("Could not update the email on Stripe customer %s (%s).", customer_id, exc.reason)
+
+
 def _subscription_state(sub: Dict[str, Any]) -> Dict[str, Any]:
     """The part of a Stripe subscription worth keeping on the user."""
     items = (sub.get("items") or {}).get("data") or []
@@ -3061,8 +3394,9 @@ async def _sync_subscription(request: Request, subscription_id: str, user_hint: 
     except AuthError as exc:
         # The account was deleted (deleting it cancels the subscription, which
         # is exactly the event that brings us here). Nothing is left to update,
-        # and failing would have Stripe retry it for three days.
-        if exc.status_code in (401, 404) or exc.reason in ("user_not_found", "session_expired"):
+        # and failing would have Stripe retry it for three days. Anything else,
+        # a refused API key included, raises so that Stripe does retry.
+        if exc.status_code == 404 or exc.reason == "user_not_found":
             log.info("Subscription %s belongs to a deleted account; nothing to update.", subscription_id)
             return
         raise
@@ -3201,6 +3535,85 @@ async def _refuse_a_second_subscription(request: Request, user: Dict[str, Any], 
         )
 
 
+async def _sync_from_stripe(request: Request, user: Dict[str, Any]) -> bool:
+    """Record the user's subscription as Stripe reports it now, not when its webhook lands.
+
+    A paid subscription wins; failing that the one on record, so an ended plan
+    whose webhook was lost still ends here; failing that the newest. Answers
+    whether there was a subscription to record.
+    """
+    customer_id = _billing(user).get("customer_id")
+    if not isinstance(customer_id, str) or not _STRIPE_ID_RE.match(customer_id):
+        return False
+    try:
+        listing = await _stripe_call(
+            "GET",
+            "/subscriptions",
+            params=[("customer", customer_id), ("status", "all"), ("limit", "10")],
+        )
+    except BillingError as exc:
+        if exc.missing:
+            return False
+        raise
+    subs = [s for s in listing.get("data") or [] if isinstance(s, dict) and isinstance(s.get("id"), str)]
+    if not subs:
+        return False
+    def created(sub: Dict[str, Any]) -> int:
+        return sub["created"] if isinstance(sub.get("created"), int) else 0
+
+    paid = [s for s in subs if s.get("status") in PAID_STATUSES]
+    on_record = [s for s in subs if s["id"] == _billing(user).get("subscription_id")]
+    chosen = max(paid, key=created) if paid else (on_record[0] if on_record else max(subs, key=created))
+    await _sync_subscription(request, chosen["id"], user["id"])
+    return True
+
+
+# A few Stripe reads per user in any ten seconds: enough for real trips back
+# from Checkout or the portal, one straight after another, while a loop of
+# requests cannot turn into a loop of Stripe and Supabase calls. Past that the
+# answer is the plan as recorded.
+SYNC_BURST = 3
+SYNC_WINDOW_SECONDS = 10.0
+_recent_syncs: "OrderedDict[str, Deque[float]]" = OrderedDict()
+
+
+def _sync_allowed(user_id: str) -> bool:
+    now = time.monotonic()
+    times = _recent_syncs.get(user_id) or deque()
+    while times and now - times[0] > SYNC_WINDOW_SECONDS:
+        times.popleft()
+    if len(times) >= SYNC_BURST:
+        return False
+    times.append(now)
+    _recent_syncs[user_id] = times
+    _recent_syncs.move_to_end(user_id)
+    while len(_recent_syncs) > USER_CACHE_MAX:
+        _recent_syncs.popitem(last=False)
+    return True
+
+
+@app.post("/api/billing/sync")
+async def billing_sync(request: Request):
+    """The signed-in user's plan, read from Stripe now rather than left to the webhook.
+
+    The profile asks on the way back from Checkout and from the Customer Portal.
+    Webhooks usually land within seconds, but can be late or fail outright (a
+    mistyped signing secret fails every one), and a customer who has paid must
+    not stay on Free waiting for one, nor see a plan they just changed as it was.
+    """
+    _require_billing(request)
+    session = await _current_session(request)
+    try:
+        user = session.user
+        if not user:
+            raise BillingError(401, "Log in to see your plan.", reason="signed_out")
+        if _sync_allowed(user["id"]) and await _sync_from_stripe(request, user):
+            user = await _auth_call(request, "GET", f"/admin/users/{user['id']}")
+    except AuthError as exc:
+        return _with_session(_error_json(exc), request, session)
+    return _with_session(JSONResponse(_public_billing(user), headers=NO_STORE), request, session)
+
+
 async def _expire_open_checkouts(customer_id: str) -> None:
     listing = await _stripe_call(
         "GET",
@@ -3247,10 +3660,14 @@ async def billing_portal(request: Request):
         customer_id = _billing(session.user).get("customer_id")
         if not isinstance(customer_id, str) or not customer_id:
             raise BillingError(409, "There's no subscription to manage yet.", reason="no_subscription")
+        # The portal shows the customer's email, and Stripe mails it: make it current.
+        await _sync_customer_email(session.user)
         portal = await _stripe_call(
             "POST",
             "/billing_portal/sessions",
-            data={"customer": customer_id, "return_url": f"{SITE_URL}{AUTH_ACCOUNT_PATH}"},
+            # ?portal=1 has the profile read the plan from Stripe on the way back,
+            # because a change made in the portal reaches the webhook a moment later.
+            data={"customer": customer_id, "return_url": f"{SITE_URL}{AUTH_ACCOUNT_PATH}?portal=1"},
         )
         url = portal.get("url")
         if not isinstance(url, str) or not url.startswith("https://"):
@@ -3405,8 +3822,42 @@ def _gated_page_route(path: str, name: str):
     return serve
 
 
+def _login_route(name: str):
+    async def serve(request: Request) -> HTMLResponse:
+        # Whether to offer Google is settled before the page is sent, so the
+        # button is in place from the first paint rather than arriving late and
+        # pushing the form down the page.
+        google = "on" if await _google_enabled(request) else "off"
+        return HTMLResponse(
+            content=_render_page(name).replace("__GOOGLE__", google),
+            headers={"Cache-Control": "no-cache, must-revalidate"},
+        )
+
+    return serve
+
+
+def _callback_route(name: str):
+    async def serve(request: Request) -> Response:
+        # A Google sign-in returns here with a code, or an error, in the query
+        # and its verifier in a cookie. Email links bring neither.
+        if AUTH_ENABLED and request.cookies.get(OAUTH_VERIFIER_COOKIE) and (
+            "code" in request.query_params or "error" in request.query_params
+        ):
+            return await _google_return(request)
+        return _serve_page(name)
+
+    return serve
+
+
 for _path, _name in PAGES.items():
-    _route = _gated_page_route(_path, _name) if _path in GATED_PAGES else _page_route(_name)
+    if _path in GATED_PAGES:
+        _route = _gated_page_route(_path, _name)
+    elif _path == AUTH_CALLBACK_PATH:
+        _route = _callback_route(_name)
+    elif _path == AUTH_LOGIN_PATH:
+        _route = _login_route(_name)
+    else:
+        _route = _page_route(_name)
     app.add_api_route(_path, _route, methods=PAGE_METHODS, include_in_schema=False)
 
 

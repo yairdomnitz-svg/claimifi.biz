@@ -674,6 +674,21 @@ html:not([data-accounts="off"]) .accounts-off-only { display: none !important; }
 .acct-section { padding: 0; }
 .acct-section h2 { font-size: 1.05rem; font-weight: 700; margin-bottom: 4px; }
 .btn-ghost.danger { color: var(--bad); border-color: rgba(191, 18, 56, .3); }
+/* Continue with Google: Google's own mark on a plain button, as its branding asks. */
+.btn-google { gap: 10px; width: 100%; text-decoration: none; }
+.btn-google .g-mark { width: 20px; height: 20px; flex: none; }
+.oauth-block { margin-bottom: 18px; }
+.oauth-block.is-off { display: none; }
+/* The server says whether Google is on before the page is sent (data-google on /login). */
+html:not([data-google="on"]) .needs-google { display: none !important; }
+#callbackConfirm .btn-col { margin-top: 18px; }
+/* An email address is one long word: let it break rather than overflow. */
+#callbackTitle, #callbackConfirm p, #callbackContinue { overflow-wrap: anywhere; }
+#callbackContinue { white-space: normal; text-align: center; }
+.or-divider { display: flex; align-items: center; gap: 12px; margin: 18px 0 0; color: var(--text-3); font-size: .84rem; }
+.or-divider::before, .or-divider::after { content: ""; flex: 1; border-top: 1px solid var(--border); }
+.google-reauth { display: flex; flex-direction: column; gap: 12px; }
+.google-reauth[hidden] { display: none; }
 .btn-ghost.danger:hover { color: var(--bad); background: var(--bad-soft); border-color: var(--bad); }
 .confirm-box { margin-top: 16px; padding: 16px; border: 1px solid var(--border-strong); border-radius: var(--r); background: var(--bg-inset); }
 .confirm-box p { color: var(--text-2); font-size: .92rem; margin-bottom: 14px; }

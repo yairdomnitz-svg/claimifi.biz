@@ -113,6 +113,18 @@ def written(headers, name):
     return None
 
 
+def pending_note(module, email="ada@example.com", next_path="") -> str:
+    """The cookie this browser gets on asking for an email link, as the server writes it."""
+    from types import SimpleNamespace
+
+    from starlette.responses import Response
+
+    response = Response()
+    module._set_pending(response, SimpleNamespace(headers={}, url=SimpleNamespace(scheme="http")), email, next_path)
+    header = response.headers.getlist("set-cookie")[0]
+    return header.split(";", 1)[0].split("=", 1)[1]
+
+
 # --------------------------------------------------------------------------
 # Off until configured
 # --------------------------------------------------------------------------
@@ -149,7 +161,10 @@ def test_signup_sends_a_confirmation_email_and_no_session(auth):
     r = c.post("/api/auth/signup", json={"email": "  ada@example.com ", "password": "correct horse"})
     assert r.status_code == 200
     assert r.json() == {"status": "confirmation_sent"}
-    assert not set_cookies(r.headers)
+    assert written(r.headers, "claimifi_access") is None and written(r.headers, "claimifi_refresh") is None
+    # Only the note that this browser asked for the link, which names no address.
+    note = written(r.headers, "claimifi_pending")
+    assert note and "ada" not in base64.urlsafe_b64decode(note.split(".")[0] + "==").decode()
 
     call = fake.last("POST", "/signup")
     assert call["json"] == GOOD
@@ -363,13 +378,91 @@ def test_resend_asks_for_the_signup_confirmation_again(auth):
 
 
 def test_a_link_session_is_verified_before_any_cookie_is_set(auth):
-    _, c, fake = auth()
+    module, c, fake = auth()
     fake.on("GET", "/user", body=USER)
     token = jwt()
-    r = c.post("/api/auth/session", json={"access_token": token, "refresh_token": "rt-9"})
+    r = c.post("/api/auth/session", json={"access_token": token, "refresh_token": "rt-9"},
+               headers={"Cookie": f"claimifi_pending={pending_note(module)}"})
     assert r.status_code == 200
+    assert r.json()["status"] == "signed_in"
     assert fake.last("GET", "/user")["headers"]["Authorization"] == f"Bearer {token}"
     assert written(r.headers, "claimifi_refresh") == "rt-9"
+    assert written(r.headers, "claimifi_pending") == '""'  # used up
+
+
+def test_someone_elses_link_asks_before_signing_in(auth):
+    """A crafted /auth/callback#access_token=…&refresh_token=… with the
+    attacker's own tokens used to sign the visitor in to the attacker's account
+    without a word, and a Pro purchase then went to the attacker."""
+    _, c, fake = auth()
+    fake.on("GET", "/user", body=USER)
+    r = c.post("/api/auth/session", json={"access_token": jwt(), "refresh_token": "rt-9"})
+    assert r.json() == {"status": "confirm", "email": "ada@example.com", "signed_in_as": None}
+    assert not set_cookies(r.headers)
+
+
+def test_continue_signs_in_once_the_visitor_agrees(auth):
+    _, c, fake = auth()
+    fake.on("GET", "/user", body=USER)
+    r = c.post("/api/auth/session", json={"access_token": jwt(), "refresh_token": "rt-9", "confirm": True})
+    assert r.json()["status"] == "signed_in"
+    assert written(r.headers, "claimifi_refresh") == "rt-9"
+
+
+def test_the_question_names_the_account_already_signed_in(auth):
+    _, c, fake = auth()
+    attacker = {**USER, "id": "user-9", "email": "mallory@example.com"}
+    tokens = {}
+
+    async def request(method, url, params=None, json=None, headers=None):
+        bearer = (headers or {}).get("Authorization", "")
+        body = USER if bearer == f"Bearer {tokens['own']}" else attacker
+        return httpx.Response(200, json=body)
+
+    fake.request = request
+    tokens["own"] = jwt()
+    r = c.post("/api/auth/session", json={"access_token": jwt(exp_in=1800), "refresh_token": "rt-9"},
+               headers=sent(tokens["own"], "rt-1"))
+    assert r.json() == {"status": "confirm", "email": "mallory@example.com", "signed_in_as": "ada@example.com"}
+
+
+def test_a_note_for_another_address_does_not_count(auth):
+    module, c, fake = auth()
+    fake.on("GET", "/user", body=USER)
+    r = c.post("/api/auth/session", json={"access_token": jwt(), "refresh_token": "rt-9"},
+               headers={"Cookie": f"claimifi_pending={pending_note(module, 'mallory@example.com')}"})
+    assert r.json()["status"] == "confirm"
+
+
+def test_a_forged_note_does_not_count(auth):
+    module, c, fake = auth()
+    fake.on("GET", "/user", body=USER)
+    payload, _ = pending_note(module).split(".")
+    r = c.post("/api/auth/session", json={"access_token": jwt(), "refresh_token": "rt-9"},
+               headers={"Cookie": f"claimifi_pending={payload}.{'0' * 32}"})
+    assert r.json()["status"] == "confirm"
+
+
+def test_a_sign_up_link_returns_to_where_the_visitor_was_going(auth):
+    module, c, fake = auth()
+    fake.on("POST", "/signup", body={"id": "user-1", "email": "ada@example.com"})
+    r = c.post("/api/auth/signup", json={**GOOD, "next": "/app?q=Rome"})
+    note = written(r.headers, "claimifi_pending")
+    fake.on("GET", "/user", body=USER)
+    r = c.post("/api/auth/session", json={"access_token": jwt(), "refresh_token": "rt-9", "type": "signup"},
+               headers={"Cookie": f"claimifi_pending={note}"})
+    assert r.json()["next"] == "/app?q=Rome"
+
+
+@pytest.mark.parametrize("path,body,supabase", [
+    ("/api/auth/resend", {"email": "ada@example.com"}, ("POST", "/resend")),
+    ("/api/auth/forgot-password", {"email": "ada@example.com"}, ("POST", "/recover")),
+])
+def test_asking_for_an_email_link_leaves_the_note(auth, path, body, supabase):
+    module, c, fake = auth()
+    fake.on(*supabase, body={})
+    r = c.post(path, json=body)
+    assert written(r.headers, "claimifi_pending") == pending_note(module)
 
 
 def test_a_forged_link_session_sets_nothing(auth):
@@ -446,21 +539,53 @@ def test_a_refreshed_session_survives_a_failed_password_change(auth):
 # --------------------------------------------------------------------------
 # token_hash links through /auth/confirm
 # --------------------------------------------------------------------------
+def asked_here(module, email="ada@example.com", next_path="") -> dict:
+    return {"Cookie": f"claimifi_pending={pending_note(module, email, next_path)}"}
+
+
 def test_a_recovery_link_signs_in_and_opens_the_reset_page(auth):
-    _, c, fake = auth()
+    module, c, fake = auth()
     fake.on("POST", "/verify", body=session())
-    r = c.get("/auth/confirm?token_hash=abc123&type=recovery", follow_redirects=False)
+    r = c.get("/auth/confirm?token_hash=abc123&type=recovery", headers=asked_here(module), follow_redirects=False)
     assert r.status_code == 303
     assert r.headers["location"] == "/reset-password"
     assert fake.last("POST", "/verify")["json"] == {"type": "recovery", "token_hash": "abc123"}
-    assert len(set_cookies(r.headers)) == 2
+    assert written(r.headers, "claimifi_access") and written(r.headers, "claimifi_refresh") == "rt-1"
 
 
 def test_a_signup_link_opens_the_account_page(auth):
+    module, c, fake = auth()
+    fake.on("POST", "/verify", body=session())
+    r = c.get("/auth/confirm?token_hash=abc123&type=email", headers=asked_here(module), follow_redirects=False)
+    assert r.headers["location"] == "/profile?welcome=1"
+
+
+def test_a_signup_link_returns_to_where_the_sign_up_started(auth):
+    module, c, fake = auth()
+    fake.on("POST", "/verify", body=session())
+    r = c.get("/auth/confirm?token_hash=abc123&type=email",
+              headers=asked_here(module, next_path="/app?q=Rome"), follow_redirects=False)
+    assert r.headers["location"] == "/app?q=Rome"
+
+
+def test_a_link_this_browser_did_not_ask_for_goes_through_the_question(auth):
+    """The token_hash form of the same attack: the attacker's own link, opened
+    by the victim, used to sign the victim in to the attacker's account."""
     _, c, fake = auth()
     fake.on("POST", "/verify", body=session())
-    r = c.get("/auth/confirm?token_hash=abc123&type=email", follow_redirects=False)
-    assert r.headers["location"] == "/profile?welcome=1"
+    r = c.get("/auth/confirm?token_hash=abc123&type=recovery", follow_redirects=False)
+    location = r.headers["location"]
+    assert location.startswith("/auth/callback#access_token=")
+    assert "refresh_token=rt-1" in location and "type=recovery" in location
+    assert not set_cookies(r.headers)
+
+
+def test_a_signed_in_visitors_own_link_needs_no_question(auth):
+    _, c, fake = auth()
+    fake.on("POST", "/verify", body=session()).on("GET", "/user", body=USER)
+    r = c.get("/auth/confirm?token_hash=abc123&type=email_change", headers=sent(jwt(), "rt-0"), follow_redirects=False)
+    assert r.headers["location"] == "/profile?email_changed=1"
+    assert written(r.headers, "claimifi_refresh") == "rt-1"
 
 
 @pytest.mark.parametrize(
@@ -468,20 +593,21 @@ def test_a_signup_link_opens_the_account_page(auth):
     ["//evil.example", "https://evil.example", "/\\evil.example", "javascript:alert(1)", "/ok\nSet-Cookie: x=1"],
 )
 def test_confirm_never_redirects_off_the_site(auth, next_value):
-    _, c, fake = auth()
+    module, c, fake = auth()
     fake.on("POST", "/verify", body=session())
     r = c.get(
         "/auth/confirm",
         params={"token_hash": "abc", "type": "email", "next": next_value},
+        headers=asked_here(module),
         follow_redirects=False,
     )
     assert r.headers["location"] == "/profile?welcome=1"
 
 
 def test_confirm_follows_a_same_site_next(auth):
-    _, c, fake = auth()
+    module, c, fake = auth()
     fake.on("POST", "/verify", body=session())
-    r = c.get("/auth/confirm?token_hash=abc&type=email&next=/app", follow_redirects=False)
+    r = c.get("/auth/confirm?token_hash=abc&type=email&next=/app", headers=asked_here(module), follow_redirects=False)
     assert r.headers["location"] == "/app"
 
 
@@ -744,3 +870,297 @@ def test_analysis_during_an_account_outage_is_refused_not_waved_through(analyzer
     r = c.post("/api/analyze", json=TITLE, headers=sent(jwt()))
     assert r.status_code == 502
     grok.assert_not_called()
+
+
+# --------------------------------------------------------------------------
+# Continue with Google
+# --------------------------------------------------------------------------
+GOOGLE_USER = {**USER, "app_metadata": {"provider": "google", "providers": ["google"]}}
+
+
+def from_google(ago: int = 60) -> list:
+    return [{"method": "oauth", "timestamp": int(time.time()) - ago}]
+
+
+def google_on(fake, on=True):
+    return fake.on("GET", "/settings", body={"external": {"email": True, "google": on}})
+
+
+def google_attr(page) -> str:
+    return page.text.split('data-google="', 1)[1].split('"', 1)[0]
+
+
+def test_google_is_not_offered_until_supabase_has_it(auth, client):
+    _, c = client()
+    assert google_attr(c.get("/login")) == "off"
+    assert c.get("/auth/google", follow_redirects=False).status_code == 404
+    _, c2, fake = auth()
+    google_on(fake, on=False)
+    assert google_attr(c2.get("/login")) == "off"
+    r = c2.get("/auth/google", follow_redirects=False)
+    assert r.status_code == 303
+    assert r.headers["location"] == "/login?google_error=unavailable"
+
+
+def test_the_login_page_arrives_with_the_google_button_in_place(auth):
+    """Decided before the page is sent: a button that appeared after a fetch
+    pushed the form down the page (CLS 0.39 on the page every visitor now sees)."""
+    _, c, fake = auth()
+    google_on(fake)
+    page = c.get("/login")
+    assert google_attr(page) == "on"
+    assert '<div id="signedOut">' in page.text  # not hidden until a fetch answers
+
+
+def test_the_provider_check_is_cached(auth):
+    _, c, fake = auth()
+    google_on(fake)
+    for _ in range(3):
+        assert google_attr(c.get("/login")) == "on"
+    assert len([x for x in fake.calls if x["path"] == "/settings"]) == 1
+
+
+def test_an_unreachable_settings_endpoint_offers_no_google(auth):
+    _, c, fake = auth()
+    fake.on("GET", "/settings", status=500, body={"msg": "down"})
+    assert google_attr(c.get("/login")) == "off"
+
+
+def test_google_sign_in_starts_with_a_pkce_challenge(auth):
+    import hashlib
+    from urllib.parse import parse_qs, urlsplit
+
+    _, c, fake = auth(SITE_URL="https://claimifi.biz")
+    google_on(fake)
+    r = c.get("/auth/google?next=/app", follow_redirects=False)
+    assert r.status_code == 303
+    target = urlsplit(r.headers["location"])
+    assert f"{target.scheme}://{target.netloc}{target.path}" == f"{SUPABASE}/auth/v1/authorize"
+    q = parse_qs(target.query)
+    assert q["provider"] == ["google"]
+    assert q["redirect_to"] == ["https://claimifi.biz/auth/callback"]
+    assert q["code_challenge_method"] == ["s256"]
+    verifier = written(r.headers, "claimifi_oauth")
+    expected = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+    assert q["code_challenge"] == [expected]
+    assert written(r.headers, "claimifi_oauth_next").strip('"') == "/app"
+    cookie = [h for h in set_cookies(r.headers) if h.startswith("claimifi_oauth=")][0]
+    assert "HttpOnly" in cookie and "Path=/auth/callback" in cookie
+
+
+def test_an_offsite_next_is_dropped(auth):
+    _, c, fake = auth()
+    google_on(fake)
+    r = c.get("/auth/google?next=//evil.example", follow_redirects=False)
+    assert written(r.headers, "claimifi_oauth_next") in ('""', "")
+
+
+def test_the_google_code_becomes_a_session(auth):
+    _, c, fake = auth()
+    fake.on("POST", "/token?pkce", body={**session(refresh="rt-g"), "user": GOOGLE_USER})
+    r = c.get("/auth/callback?code=abc123",
+              headers={"Cookie": "claimifi_oauth=verif; claimifi_oauth_next=/app"}, follow_redirects=False)
+    assert r.status_code == 303
+    assert r.headers["location"] == "/app"
+    assert fake.last("POST", "/token")["json"] == {"auth_code": "abc123", "code_verifier": "verif"}
+    assert written(r.headers, "claimifi_refresh") == "rt-g"
+    assert written(r.headers, "claimifi_oauth") == '""'
+
+
+def test_without_a_next_google_lands_on_the_profile(auth):
+    _, c, fake = auth()
+    fake.on("POST", "/token?pkce", body=session())
+    r = c.get("/auth/callback?code=abc123", headers={"Cookie": "claimifi_oauth=verif"}, follow_redirects=False)
+    assert r.headers["location"] == "/profile"
+
+
+@pytest.mark.parametrize("query, reason", [
+    ("error=access_denied&error_description=denied", "cancelled"),
+    ("error=server_error&error_code=signup_disabled", "signup_disabled"),
+    ("error=server_error", "failed"),
+])
+def test_a_google_failure_returns_to_log_in_with_its_reason(auth, query, reason):
+    _, c, fake = auth()
+    r = c.get(f"/auth/callback?{query}",
+              headers={"Cookie": "claimifi_oauth=verif; claimifi_oauth_next=/app"}, follow_redirects=False)
+    assert r.headers["location"] == f"/login?google_error={reason}&next=/app"
+    assert fake.calls == []
+
+
+def test_a_rejected_code_sets_no_session(auth):
+    _, c, fake = auth()
+    fake.on("POST", "/token?pkce", status=400, body={"code": "bad_code_verifier"})
+    r = c.get("/auth/callback?code=abc123", headers={"Cookie": "claimifi_oauth=verif"}, follow_redirects=False)
+    assert r.headers["location"] == "/login?google_error=failed"
+    assert written(r.headers, "claimifi_refresh") is None
+
+
+def test_the_callback_page_still_serves_email_links(auth):
+    _, c, fake = auth()
+    # No verifier cookie: this is not a Google sign-in, so the page handles it.
+    r = c.get("/auth/callback?code=abc123", follow_redirects=False)
+    assert r.status_code == 200
+    assert fake.calls == []
+
+
+def test_me_says_how_a_google_account_confirms_itself(auth):
+    _, c, fake = auth()
+    fake.on("GET", "/user", body=GOOGLE_USER)
+    user = c.get("/api/auth/me", headers=sent(jwt(amr=from_google(ago=7200)))).json()["user"]
+    assert user["google"] is True and user["has_password"] is False and user["recent_sign_in"] is False
+    _, c2, fake2 = auth()
+    fake2.on("GET", "/user", body=GOOGLE_USER)
+    user = c2.get("/api/auth/me", headers=sent(jwt(amr=from_google()))).json()["user"]
+    assert user["recent_sign_in"] is True
+
+
+def test_a_password_account_still_has_a_password(auth):
+    _, c, fake = auth()
+    fake.on("GET", "/user", body={**USER, "app_metadata": {"providers": ["email"]}})
+    user = c.get("/api/auth/me", headers=sent(jwt())).json()["user"]
+    assert user["has_password"] is True and user["google"] is False
+
+
+def test_a_recent_google_sign_in_deletes_without_a_password(auth):
+    _, c, fake = auth()
+    fake.on("GET", "/user", body=GOOGLE_USER)
+    fake.on("DELETE", "/admin/users/user-1", body={})
+    r = c.post("/api/auth/delete", json={}, headers=sent(jwt(amr=from_google())))
+    assert r.status_code == 200
+    assert not [x for x in fake.calls if x["path"] == "/token"]
+
+
+def test_an_old_google_sign_in_still_needs_confirming_to_delete(auth):
+    _, c, fake = auth()
+    fake.on("GET", "/user", body=GOOGLE_USER)
+    r = c.post("/api/auth/delete", json={}, headers=sent(jwt(amr=from_google(ago=7200))))
+    assert r.status_code == 400
+    assert not [x for x in fake.calls if x["method"] == "DELETE"]
+
+
+def test_a_recent_google_sign_in_sets_a_password_without_the_old_one(auth):
+    _, c, fake = auth()
+    fake.on("GET", "/user", body=GOOGLE_USER)
+    fake.on("PUT", "/user", body=GOOGLE_USER)
+    fake.on("PUT", "/admin/users/user-1", body=GOOGLE_USER)
+    r = c.post("/api/auth/password", json={"password": "a new password"}, headers=sent(jwt(amr=from_google())))
+    assert r.status_code == 200
+
+
+def test_a_google_account_that_sets_a_password_is_known_to_have_one(auth):
+    """Setting a password adds no "email" provider, so without its own note the
+    profile went on asking for a Google re-check instead of the password."""
+    _, c, fake = auth()
+    fake.on("GET", "/user", body=GOOGLE_USER).on("PUT", "/user", body=GOOGLE_USER)
+    fake.on("PUT", "/admin/users/user-1", body=GOOGLE_USER)
+    c.post("/api/auth/password", json={"password": "a new password"}, headers=sent(jwt(amr=from_google())))
+    assert fake.last("PUT", "/admin/users/user-1")["json"] == {"app_metadata": {"password_set": True}}
+
+    noted = {**GOOGLE_USER, "app_metadata": {**GOOGLE_USER["app_metadata"], "password_set": True}}
+    _, c2, fake2 = auth()
+    fake2.on("GET", "/user", body=noted)
+    assert c2.get("/api/auth/me", headers=sent(jwt())).json()["user"]["has_password"] is True
+
+
+def test_a_password_account_changing_its_password_writes_no_note(auth):
+    _, c, fake = auth()
+    fake.on("GET", "/user", body={**USER, "app_metadata": {"providers": ["email"]}})
+    fake.on("PUT", "/user", body=USER)
+    c.post("/api/auth/password", json={"password": "a new password"}, headers=sent(jwt(amr=from_link())))
+    assert not [x for x in fake.calls if x["path"].startswith("/admin/")]
+
+
+def test_googles_name_fills_in_until_the_profile_sets_one(auth):
+    _, c, fake = auth()
+    fake.on("GET", "/user", body={**GOOGLE_USER, "user_metadata": {"full_name": "Ada Lovelace"}})
+    assert c.get("/api/auth/me", headers=sent(jwt())).json()["user"]["display_name"] == "Ada Lovelace"
+    _, c2, fake2 = auth()
+    fake2.on("GET", "/user", body={**GOOGLE_USER, "user_metadata": {"full_name": "Ada Lovelace", "display_name": "Ada"}})
+    assert c2.get("/api/auth/me", headers=sent(jwt())).json()["user"]["display_name"] == "Ada"
+
+
+# --------------------------------------------------------------------------
+# Re-checking with Google from the profile
+# --------------------------------------------------------------------------
+OTHER_USER = {**GOOGLE_USER, "id": "user-2", "email": "someone.else@example.com"}
+
+
+def test_a_signed_in_re_check_asks_google_for_this_account(auth):
+    from urllib.parse import parse_qs, urlsplit
+
+    _, c, fake = auth()
+    google_on(fake)
+    fake.on("GET", "/user", body=GOOGLE_USER)
+    r = c.get("/auth/google?next=/profile", headers=sent(jwt()), follow_redirects=False)
+    q = parse_qs(urlsplit(r.headers["location"]).query)
+    assert q["prompt"] == ["select_account"]
+    assert q["login_hint"] == ["ada@example.com"]
+    assert written(r.headers, "claimifi_oauth_for") == "user-1"
+
+
+def test_a_first_sign_in_sets_no_account_to_match(auth):
+    from urllib.parse import parse_qs, urlsplit
+
+    _, c, fake = auth()
+    google_on(fake)
+    r = c.get("/auth/google", follow_redirects=False)
+    assert "prompt" not in parse_qs(urlsplit(r.headers["location"]).query)
+    assert written(r.headers, "claimifi_oauth_for") in (None, '""', "")
+
+
+def test_a_re_check_that_returns_another_account_keeps_the_current_session(auth):
+    """Signed in as A, re-checking with Google account B used to switch the
+    profile to B, so "delete my account" deleted B while A survived."""
+    _, c, fake = auth()
+    fake.on("POST", "/token?pkce", body={**session(refresh="rt-b"), "user": OTHER_USER})
+    fake.on("POST", "/logout", status=204)
+    r = c.get("/auth/callback?code=abc123", follow_redirects=False,
+              headers={"Cookie": "claimifi_oauth=verif; claimifi_oauth_next=/profile; claimifi_oauth_for=user-1"})
+    assert r.headers["location"] == "/profile?google_error=other_account"
+    assert written(r.headers, "claimifi_refresh") is None
+    assert written(r.headers, "claimifi_access") is None
+    assert fake.last("POST", "/logout")["params"] == {"scope": "local"}
+
+
+def test_a_re_check_as_the_same_account_refreshes_the_session(auth):
+    _, c, fake = auth()
+    fake.on("POST", "/token?pkce", body={**session(refresh="rt-a"), "user": GOOGLE_USER})
+    r = c.get("/auth/callback?code=abc123", follow_redirects=False,
+              headers={"Cookie": "claimifi_oauth=verif; claimifi_oauth_next=/profile; claimifi_oauth_for=user-1"})
+    assert r.headers["location"] == "/profile"
+    assert written(r.headers, "claimifi_refresh") == "rt-a"
+    assert written(r.headers, "claimifi_oauth_for") == '""'
+
+
+def test_a_cancelled_re_check_says_so_on_the_profile(auth):
+    """The log-in page forwards a signed-in visitor straight on, so a failure
+    sent there was never seen."""
+    _, c, fake = auth()
+    r = c.get("/auth/callback?error=access_denied", follow_redirects=False,
+              headers={"Cookie": "claimifi_oauth=verif; claimifi_oauth_for=user-1"})
+    assert r.headers["location"] == "/profile?google_error=cancelled"
+    assert fake.calls == []
+
+
+# --------------------------------------------------------------------------
+# Supabase refusing this server's own key
+# --------------------------------------------------------------------------
+INVALID_KEY = {"message": "Invalid API key", "hint": "Double check your Supabase `anon` or `service_role` API key."}
+
+
+def test_a_refused_api_key_is_an_outage_not_a_sign_out(auth):
+    """Read as "session over", a revoked or mistyped SUPABASE_SECRET_KEY signed
+    every visitor out and cleared their cookies, instead of reporting a fault."""
+    _, c, fake = auth()
+    fake.on("GET", "/user", status=401, body=INVALID_KEY)
+    r = c.get("/api/auth/me", headers=sent(jwt(), "rt-1"))
+    assert r.status_code == 502
+    assert r.json()["reason"] == "auth_misconfigured"
+    assert not set_cookies(r.headers)
+
+
+def test_a_deleted_user_is_still_read_as_deleted(fresh_main):
+    module = fresh_main()
+    exc = module._auth_failure(404, {"code": "user_not_found", "msg": "User not found"})
+    assert exc.reason == "user_not_found"
+    assert module._auth_failure(403, {"code": "bad_jwt", "msg": "invalid JWT"}).reason == "session_expired"

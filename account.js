@@ -70,10 +70,12 @@
     if (on) button.setAttribute('aria-busy', 'true'); else button.removeAttribute('aria-busy');
   }
 
+  // In the page's language, not the browser's: an English page priced in US
+  // dollars read "US$7,99" next to its own "$0" in some locales.
   function money(amount, currency) {
     if (typeof amount !== 'number') return null;
     try {
-      return new Intl.NumberFormat(undefined, { style: 'currency', currency: (currency || 'usd').toUpperCase() }).format(amount / 100);
+      return new Intl.NumberFormat(root.lang || 'en', { style: 'currency', currency: (currency || 'usd').toUpperCase() }).format(amount / 100);
     } catch (e) {
       return '$' + (amount / 100).toFixed(2);
     }
@@ -190,6 +192,15 @@
 
   /* ---------------- Log in, sign up, forgot password ---------------- */
 
+  var GOOGLE_ERRORS = {
+    cancelled: 'Signing in with Google was cancelled.',
+    signup_disabled: "New accounts can't be created right now.",
+    unavailable: "Signing in with Google isn't available right now. Use your email and password instead.",
+    failed: "Signing in with Google didn't work. Please try again.",
+    other_account: "That was a different Google account, so nothing changed: you're still signed in as before. " +
+      "Choose the Google account this profile uses."
+  };
+
   function loginPage() {
     if (!ACCOUNTS_ON) return;
     var msg = $('accountMsg');
@@ -199,6 +210,22 @@
     if (q.get('deleted') === '1') say(msg, 'ok', 'Your account has been deleted, and any subscription cancelled. Thank you for using Claimifi.biz.');
     var linkError = q.get('error_code');
     if (linkError) say(msg, 'err', linkMessage(linkError));
+    var googleError = q.get('google_error');
+    if (googleError) say(msg, 'err', GOOGLE_ERRORS[googleError] || GOOGLE_ERRORS.failed);
+    // Set now rather than once /me answers: a message arriving late pushes
+    // the whole form down the page.
+    if (q.get('welcome') === '1' && !msg.textContent) {
+      say(msg, 'ok', 'Your email is confirmed. Log in to open your account.');
+    }
+    if (next && next.indexOf('/pricing') === 0 && !msg.textContent) {
+      say(msg, 'info', 'Log in or create an account to subscribe to Pro.');
+    }
+    if (next && /^\/app(?:[?#]|$)/.test(next) && !msg.textContent) {
+      say(msg, 'info', 'Log in or create a free account to use the analyzer.');
+    }
+
+    // The button is only on the page while Google is switched on in Supabase.
+    $('googleBtn').setAttribute('href', '/auth/google' + (next ? '?next=' + encodeURIComponent(next) : ''));
 
     var tabLogin = $('tabLogin'), tabSignup = $('tabSignup');
     var loginForm = $('loginForm'), signupForm = $('signupForm'), forgotForm = $('forgotForm');
@@ -213,6 +240,7 @@
       loginForm.hidden = which !== 'login';
       signupForm.hidden = which !== 'signup';
       forgotForm.hidden = which !== 'forgot';
+      $('googleBlock').classList.toggle('is-off', which === 'forgot');
       tabLogin.setAttribute('aria-selected', which === 'login' ? 'true' : 'false');
       tabSignup.setAttribute('aria-selected', which === 'signup' ? 'true' : 'false');
     }
@@ -248,7 +276,7 @@
     $('resendBtn').addEventListener('click', function () {
       var button = $('resendBtn');
       busy(button, true);
-      request('POST', '/api/auth/resend', { email: $('loginEmail').value.trim() }).then(function (r) {
+      request('POST', '/api/auth/resend', { email: $('loginEmail').value.trim(), next: next || '' }).then(function (r) {
         busy(button, false);
         say(msg, r.ok ? 'ok' : 'err', r.ok ? 'Sent. Check your inbox for the confirmation link.' : errorText(r));
       });
@@ -262,7 +290,8 @@
       if (!email) { say(msg, 'err', 'Enter your email address.'); return; }
       if (password.length < 8) { say(msg, 'err', 'Use at least 8 characters for your password.'); return; }
       busy(button, true);
-      request('POST', '/api/auth/signup', { email: email, password: password }).then(function (r) {
+      // `next` rides along so the confirmation link returns the visitor to it.
+      request('POST', '/api/auth/signup', { email: email, password: password, next: next || '' }).then(function (r) {
         busy(button, false);
         if (!r.ok) { say(msg, 'err', errorText(r)); return; }
         if (r.data.status === 'signed_in') { afterSignIn(true); return; }
@@ -285,22 +314,17 @@
       });
     });
 
+    if (window.location.hash === '#forgot') show('forgot');
+    else if (window.location.hash === '#signup') show('signup');
+
     request('GET', '/api/auth/me').then(function (r) {
-      // Signed in already: carry on to wherever this visitor was going.
-      if (r.ok && r.data.user) { window.location.replace(next || '/profile'); return; }
-      $('signedOut').hidden = false;
-      if (!r.ok) { say(msg, 'err', errorText(r)); return; }
-      if (q.get('welcome') === '1') {
-        say(msg, 'ok', 'Your email is confirmed. Log in to open your account.');
+      // Signed in already: carry on to wherever this visitor was going. A
+      // Google problem goes with them, or forwarding would swallow it.
+      if (r.ok && r.data.user) {
+        window.location.replace(googleError ? '/profile?google_error=' + encodeURIComponent(googleError) : (next || '/profile'));
+        return;
       }
-      if (next && next.indexOf('/pricing') === 0 && !msg.textContent) {
-        say(msg, 'info', 'Log in or create an account to subscribe to Pro.');
-      }
-      if (next && /^\/app(?:[?#]|$)/.test(next) && !msg.textContent) {
-        say(msg, 'info', 'Log in or create a free account to use the analyzer.');
-      }
-      if (window.location.hash === '#forgot') show('forgot');
-      else if (window.location.hash === '#signup') show('signup');
+      if (!r.ok) say(msg, 'err', errorText(r));
     });
   }
 
@@ -314,12 +338,48 @@
     if (q.get('checkout') === 'success') say(msg, 'ok', 'Thank you! Your payment went through. Pro switches on within a few seconds.');
     if (q.get('email_changed') === '1') say(msg, 'ok', 'Your email address has been changed.');
     if (q.get('email_change') === 'pending') say(msg, 'info', EMAIL_CHANGE_HALF_DONE);
+    // A Google re-check started here that didn't work out.
+    if (q.get('google_error')) say(msg, 'err', GOOGLE_ERRORS[q.get('google_error')] || GOOGLE_ERRORS.failed);
 
     // Messages scroll into view: on a long account page the result of a click
     // near the bottom would otherwise appear off-screen at the top.
     function notify(kind, text) {
       say(msg, kind, text);
       try { msg.scrollIntoView({ block: 'nearest' }); } catch (e) { /* old browsers */ }
+    }
+
+    // A recent email-link or Google sign-in already proved who this is, so no
+    // password is asked for. An account with no password to type confirms
+    // with Google instead.
+    var skipPassword = false, needsGoogle = false, noPassword = false;
+
+    function renderSecurity(user) {
+      skipPassword = !!user.recent_sign_in;
+      noPassword = user.has_password === false;
+      needsGoogle = !skipPassword && noPassword;
+      $('currentPasswordField').hidden = skipPassword;
+      $('passwordGoogle').hidden = !needsGoogle;
+      $('passwordForm').hidden = needsGoogle;
+      $('deletePasswordField').hidden = skipPassword || needsGoogle;
+      $('deleteGoogle').hidden = !needsGoogle;
+      // An account that signs in with Google has no password to change yet.
+      $('securityH').textContent = noPassword ? 'Set a password' : 'Password';
+      $('passwordForm').querySelector('button[type="submit"]').textContent = noPassword ? 'Set password' : 'Update password';
+      $('resetByEmailText').textContent = noPassword
+        ? "Prefer email? We'll send you a link to set a password."
+        : "Forgot your password? We'll email you a link to set a new one.";
+    }
+
+    // The hour after a link or Google sign-in can run out while this page is
+    // open. The server then wants a password the page had hidden: ask it who
+    // this is again, show the fields that now apply, and say why.
+    function recheckSecurity() {
+      request('GET', '/api/auth/me').then(function (r) {
+        if (r.ok && r.data.user) renderSecurity(r.data.user);
+        notify('err', needsGoogle
+          ? "It's been a while since you signed in. Sign in with Google again to confirm it's you."
+          : "It's been a while since you signed in. Enter your password to confirm it's you.");
+      });
     }
 
     function renderProfile(user) {
@@ -443,25 +503,44 @@
       if (renews(b) && !$('deleteForm').hidden) closeDeleteForm(false);
     }
 
+    // Stripe tells the site about a payment, or a change made in its portal, by
+    // webhook, and that can land after the visitor is back here, or never. So
+    // on the way back the plan is read from Stripe itself.
+    function syncPlan(done) {
+      request('POST', '/api/billing/sync').then(function (s) {
+        if (s.ok) renderPlan(s.data);
+        if (done) done(s.ok ? s.data : null);
+      });
+    }
+
+    function afterPlan(b, attempt) {
+      var paid = q.get('checkout') === 'success';
+      if (paid && b.plan === 'pro') {
+        $('newAccountWelcome').hidden = true;
+        // The card says it all the first time. Someone coming back to Pro has
+        // seen it already, and still needs to hear the payment worked.
+        if (showWelcome('proWelcome', 'proWelcomeTitle', 'claimifi-pro-welcome-seen')) say(msg, '', '');
+        else say(msg, 'ok', 'Thank you! Your payment went through, and Pro is on.');
+      } else if (paid && attempt < 6) {
+        // Stripe can take a moment to report a fresh payment: look again.
+        setTimeout(function () { loadPlan(attempt + 1); }, 2500);
+      } else if (paid) {
+        say(msg, 'info', 'Your payment went through, but Pro has not switched on yet. Refresh this page in a minute.');
+      }
+    }
+
     function loadPlan(attempt) {
       if (!BILLING_ON) return;
       request('GET', '/api/billing/status').then(function (r) {
         if (!r.ok) return;
         renderPlan(r.data);
-        if (q.get('checkout') === 'success' && r.data.plan === 'pro') {
-          $('newAccountWelcome').hidden = true;
-          // The card says it all the first time. Someone coming back to Pro has
-          // seen it already, and still needs to hear the payment worked.
-          if (showWelcome('proWelcome', 'proWelcomeTitle', 'claimifi-pro-welcome-seen')) say(msg, '', '');
-          else say(msg, 'ok', 'Thank you! Your payment went through, and Pro is on.');
+        var needSync = q.get('portal') === '1' ? attempt === 0
+          : q.get('checkout') === 'success' && r.data.plan !== 'pro';
+        if (needSync) {
+          syncPlan(function (b) { afterPlan(b || r.data, attempt); });
+          return;
         }
-        // Stripe tells the site about a payment by webhook, a moment after the
-        // visitor is sent back here. Look again a few times before giving up.
-        if (q.get('checkout') === 'success' && r.data.plan !== 'pro' && attempt < 6) {
-          setTimeout(function () { loadPlan(attempt + 1); }, 2500);
-        } else if (q.get('checkout') === 'success' && r.data.plan !== 'pro') {
-          say(msg, 'info', 'Your payment went through, but Pro has not switched on yet. Refresh this page in a minute.');
-        }
+        afterPlan(r.data, attempt);
       });
     }
 
@@ -497,9 +576,13 @@
     });
 
     /* Subscription: portal, cancel, resume */
-    // Back from Stripe's portal, the browser can restore the page with the
-    // button still disabled.
-    window.addEventListener('pageshow', function (e) { if (e.persisted) busy($('portalBtn'), false); });
+    // Back from Stripe's portal, the browser can restore the page as it was
+    // left: the button still disabled and the plan as it was before any change.
+    window.addEventListener('pageshow', function (e) {
+      if (!e.persisted) return;
+      busy($('portalBtn'), false);
+      if (BILLING_ON) syncPlan();
+    });
     $('portalBtn').addEventListener('click', function () {
       var button = $('portalBtn');
       busy(button, true);
@@ -553,14 +636,21 @@
       var button = $('passwordForm').querySelector('button[type="submit"]');
       var current = $('currentPassword').value;
       var password = $('newPassword').value;
-      if (!current) { notify('err', 'Enter your current password.'); $('currentPassword').focus(); return; }
+      if (!current && !skipPassword) { notify('err', 'Enter your current password.'); $('currentPassword').focus(); return; }
       if (password.length < 8) { notify('err', 'Use at least 8 characters for your new password.'); return; }
       if (password !== $('newPasswordConfirm').value) { notify('err', "The two new passwords don't match."); return; }
       busy(button, true);
       request('POST', '/api/auth/password', { password: password, current_password: current }).then(function (r) {
         busy(button, false);
-        notify(r.ok ? 'ok' : 'err', r.ok ? 'Your password has been changed.' : errorText(r));
-        if (r.ok) $('passwordForm').reset();
+        if (!r.ok && r.data.reason === 'current_password_required' && skipPassword) { recheckSecurity(); return; }
+        if (!r.ok) { notify('err', errorText(r)); return; }
+        notify('ok', noPassword
+          ? 'Your password is set. You can log in with your email and this password as well as with Google.'
+          : 'Your password has been changed.');
+        $('passwordForm').reset();
+        if (noPassword) {
+          request('GET', '/api/auth/me').then(function (m) { if (m.ok && m.data.user) renderSecurity(m.data.user); });
+        }
       });
     });
 
@@ -647,13 +737,14 @@
       if (renews(plan)) { openSubBlock(); return; }
       $('deleteForm').hidden = false;
       $('deleteStart').hidden = true;
-      $('deletePassword').focus();
+      (skipPassword || needsGoogle ? $('deleteConfirm') : $('deletePassword')).focus();
     });
     $('deleteCancel').addEventListener('click', function () { closeDeleteForm(true); });
     $('deleteForm').addEventListener('submit', function (e) {
       e.preventDefault();
       if ($('deleteConfirm').value.trim() !== 'DELETE') { notify('err', 'Type DELETE in capitals to confirm.'); return; }
-      if (!$('deletePassword').value) { notify('err', 'Enter your password to confirm.'); return; }
+      if (needsGoogle) { notify('err', "Sign in with Google again first, to confirm it's you."); return; }
+      if (!skipPassword && !$('deletePassword').value) { notify('err', 'Enter your password to confirm.'); return; }
       var button = $('deleteForm').querySelector('button[type="submit"]');
       busy(button, true);
       request('POST', '/api/auth/delete', { password: $('deletePassword').value }).then(function (r) {
@@ -665,6 +756,7 @@
           loadPlan(0);
           return;
         }
+        if (!r.ok && r.data.reason === 'validation_failed' && skipPassword) { recheckSecurity(); return; }
         if (!r.ok) { notify('err', errorText(r)); return; }
         window.location.href = '/login?deleted=1';
       });
@@ -685,6 +777,7 @@
       accountTag = tagFor(user.email);
       accountEmail = user.email || '';
       renderProfile(user);
+      renderSecurity(user);
       if (q.get('welcome') === '1') {
         showWelcome('newAccountWelcome', 'newAccountWelcomeTitle', 'claimifi-welcome-seen');
       }
@@ -717,9 +810,23 @@
     // The tokens must not sit in the address bar, the history or a bookmark.
     try { history.replaceState(null, '', window.location.pathname); } catch (e) { /* unavailable */ }
 
-    if (failed || !ACCOUNTS_ON) {
-      say(msg, 'err', ACCOUNTS_ON ? linkMessage(failed) : "Accounts aren't available yet.");
+    // A link that didn't work: say so in the heading too, and offer the way on
+    // that fits, which is the profile for someone already signed in.
+    function fail(kind, text) {
+      $('callbackTitle').textContent = kind === 'info' ? 'Almost done' : "That link didn't work";
+      document.title = $('callbackTitle').textContent + ' | Claimifi.biz';
+      say(msg, kind, text);
       $('callbackActions').hidden = false;
+      if (!ACCOUNTS_ON) return;
+      request('GET', '/api/auth/me').then(function (r) {
+        if (!r.ok || !r.data.user) return;
+        $('callbackActionLink').setAttribute('href', '/profile');
+        $('callbackActionLink').textContent = 'Go to your profile';
+      });
+    }
+
+    if (failed || !ACCOUNTS_ON) {
+      fail('err', ACCOUNTS_ON ? linkMessage(failed) : "Accounts aren't available yet.");
       return;
     }
     if (!hash.access_token || !hash.refresh_token) {
@@ -727,27 +834,58 @@
       // arrives with only a message: that half worked. Our own words are shown,
       // never the message from the address bar, which anyone can write.
       if (hash.message) {
-        say(msg, 'info', EMAIL_CHANGE_HALF_DONE);
-        $('callbackActions').hidden = false;
+        fail('info', EMAIL_CHANGE_HALF_DONE);
         return;
       }
-      say(msg, 'err', linkMessage('invalid_link'));
-      $('callbackActions').hidden = false;
+      fail('err', linkMessage('invalid_link'));
       return;
     }
-    request('POST', '/api/auth/session', {
-      access_token: hash.access_token,
-      refresh_token: hash.refresh_token
-    }).then(function (r) {
-      if (!r.ok) {
-        say(msg, 'err', errorText(r));
-        $('callbackActions').hidden = false;
-        return;
-      }
+
+    var tokens = { access_token: hash.access_token, refresh_token: hash.refresh_token, type: hash.type || '' };
+
+    function finish(d) {
       window.location.replace(
         hash.type === 'recovery' ? '/reset-password'
           : hash.type === 'email_change' ? '/profile?email_changed=1'
-          : '/profile?welcome=1');
+          : safeNext(d && d.next) || '/profile?welcome=1');
+    }
+
+    // A link this browser didn't ask for: it could be the visitor's own, opened
+    // on another device, or someone else's sent to sign them in to that
+    // account. Nothing is signed in until they see whose it is and agree.
+    function confirmFirst(d) {
+      msg.hidden = true;
+      $('callbackTitle').textContent = 'Continue as ' + d.email + '?';
+      document.title = 'Continue? | Claimifi.biz';
+      $('callbackConfirmText').textContent =
+        hash.type === 'recovery' ? 'This link sets a new password for the Claimifi.biz account ' + d.email + '.'
+          : 'This link signs you in to Claimifi.biz as ' + d.email + '.';
+      var other = $('callbackConfirmOther');
+      other.hidden = !d.signed_in_as;
+      if (d.signed_in_as) {
+        other.textContent = "You're signed in as " + d.signed_in_as + ' in this browser. Continuing switches to ' + d.email + '.';
+      }
+      $('callbackConfirm').hidden = false;
+      $('callbackContinue').textContent = 'Continue as ' + d.email;
+      $('callbackContinue').focus();
+      $('callbackContinue').addEventListener('click', function () {
+        var button = this;
+        busy(button, true);
+        tokens.confirm = true;
+        request('POST', '/api/auth/session', tokens).then(function (r) {
+          busy(button, false);
+          if (r.ok && r.data.status === 'signed_in') { finish(r.data); return; }
+          $('callbackConfirm').hidden = true;
+          msg.hidden = false;
+          fail('err', errorText(r));
+        });
+      });
+    }
+
+    request('POST', '/api/auth/session', tokens).then(function (r) {
+      if (!r.ok) { fail('err', errorText(r)); return; }
+      if (r.data.status === 'confirm') { confirmFirst(r.data); return; }
+      finish(r.data);
     });
   }
 

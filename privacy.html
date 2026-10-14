@@ -69,8 +69,8 @@
       <p>To stop the service being overloaded, the server counts recent analyses per IP address (per account for Pro subscribers). These counts are held in memory for at most a few hours and are never written to disk. Our host, Railway, may keep standard request logs.</p>
 
       <h2>Accounts</h2>
-      <p>If you create an account, your email address and password are handled by Supabase, our account provider. Passwords are stored by Supabase in hashed form; we never see them. We use your email only to run your account: confirmation, password resets and messages about your subscription.</p>
-      <p>Signing in sets two cookies that keep you logged in. They are strictly necessary, can't be read by scripts on the page, and are removed when you sign out. Visitors without an account get no cookies at all.</p>
+      <p>If you create an account, your email address and password are handled by Supabase, our account provider. Passwords are stored by Supabase in hashed form; we never see them.<span class="needs-accounts"> If you continue with Google, Google shares your name, email address and profile picture with our account provider.</span> We use your email only to run your account: confirmation, password resets and messages about your subscription.</p>
+      <p>Signing in sets two cookies that keep you logged in. They are strictly necessary, can't be read by scripts on the page, and are removed when you sign out. Asking for an email link (to confirm an account, reset a password or change an email), or signing in with Google, also sets a short-lived cookie that lets the link or the sign-in finish in the same browser; it holds no readable email address and is gone within a day. Other visitors get no cookies at all.</p>
 
       <h2>Payments</h2>
       <p>Pro subscriptions are paid through Stripe, on Stripe's own checkout page. Your card details go to Stripe and never reach our server. We keep a record of your plan, its billing period and your Stripe customer reference with your account, so we know which features to give you.</p>

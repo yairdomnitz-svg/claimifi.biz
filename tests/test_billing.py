@@ -336,11 +336,92 @@ def test_portal_needs_a_customer(billing):
 def test_portal_opens_for_the_users_own_customer(billing):
     _, c, supa, stripe = billing()
     supa.on("GET", "/user", body=user({"customer_id": "cus_1", "status": "active"}))
+    stripe.on("POST", "/customers/cus_1", body={"id": "cus_1"})
     stripe.on("POST", "/billing_portal/sessions", body={"url": "https://billing.stripe.com/p/session/x"})
     r = c.post("/api/billing/portal", headers=signed_in())
     assert r.json() == {"url": "https://billing.stripe.com/p/session/x"}
     data = stripe.last("POST", "/billing_portal/sessions")["data"]
-    assert data == {"customer": "cus_1", "return_url": "https://claimifi.biz/profile"}
+    # ?portal=1: the profile reads the plan from Stripe on the way back.
+    assert data == {"customer": "cus_1", "return_url": "https://claimifi.biz/profile?portal=1"}
+    # The portal shows, and Stripe mails, the account's current address.
+    assert stripe.last("POST", "/customers/cus_1")["data"] == {"email": "ada@example.com"}
+
+
+# --------------------------------------------------------------------------
+# Reading the plan from Stripe on the way back (no waiting for the webhook)
+# --------------------------------------------------------------------------
+def sync_ready(supa, stripe, subs, current=None, after=None):
+    supa.on("GET", "/user", body=user(current if current is not None else {"customer_id": "cus_1"}))
+    stripe.on("GET", "/subscriptions", body={"object": "list", "data": subs})
+    for sub in subs:
+        stripe.on("GET", f"/subscriptions/{sub['id']}", body=sub)
+    supa.on("GET", f"/admin/users/{USER_ID}", body=user(after if after is not None else current))
+    supa.on("PUT", f"/admin/users/{USER_ID}", body=user())
+
+
+def test_a_payment_whose_webhook_never_came_still_switches_pro_on(billing):
+    """With the webhook late or failing (a mistyped signing secret fails every
+    one), a customer who had paid stayed on Free, and refreshing didn't help."""
+    _, c, supa, stripe = billing()
+    sync_ready(supa, stripe, [subscription(status="active")],
+               after={"customer_id": "cus_1", "subscription_id": "sub_1", "status": "active", "interval": "yearly"})
+    r = c.post("/api/billing/sync", headers=signed_in())
+    assert r.json()["plan"] == "pro"
+    saved = supa.last("PUT", f"/admin/users/{USER_ID}")["json"]["app_metadata"]["billing"]
+    assert saved["status"] == "active" and saved["subscription_id"] == "sub_1"
+    assert stripe.last("GET", "/subscriptions")["params"] == [("customer", "cus_1"), ("status", "all"), ("limit", "10")]
+
+
+def test_a_change_made_in_the_portal_shows_on_the_way_back(billing):
+    _, c, supa, stripe = billing()
+    cancelling = subscription(status="active")
+    cancelling["cancel_at_period_end"] = True
+    pro = {"customer_id": "cus_1", "subscription_id": "sub_1", "status": "active", "cancel_at_period_end": False}
+    sync_ready(supa, stripe, [cancelling], current=pro, after={**pro, "cancel_at_period_end": True})
+    r = c.post("/api/billing/sync", headers=signed_in())
+    assert r.json()["cancel_at_period_end"] is True
+    assert supa.last("PUT", f"/admin/users/{USER_ID}")["json"]["app_metadata"]["billing"]["cancel_at_period_end"] is True
+
+
+def test_a_paid_subscription_wins_over_an_old_ended_one(billing):
+    _, c, supa, stripe = billing()
+    old = {**subscription(sub_id="sub_old", status="canceled"), "created": 1_700_000_000}
+    new = {**subscription(sub_id="sub_new", status="active"), "created": 1_750_000_000}
+    sync_ready(supa, stripe, [old, new])
+    c.post("/api/billing/sync", headers=signed_in())
+    assert ("GET", "/subscriptions/sub_new") in stripe.paths()
+    assert ("GET", "/subscriptions/sub_old") not in stripe.paths()
+
+
+def test_a_plan_that_ended_without_its_webhook_ends_here_too(billing):
+    _, c, supa, stripe = billing()
+    pro = {"customer_id": "cus_1", "subscription_id": "sub_1", "status": "active"}
+    sync_ready(supa, stripe, [subscription(status="canceled")], current=pro, after={**pro, "status": "canceled"})
+    assert c.post("/api/billing/sync", headers=signed_in()).json()["plan"] == "free"
+
+
+def test_sync_without_a_customer_asks_stripe_nothing(billing):
+    _, c, supa, stripe = billing()
+    supa.on("GET", "/user", body=user())
+    r = c.post("/api/billing/sync", headers=signed_in())
+    assert r.status_code == 200 and r.json()["plan"] == "free"
+    assert not [p for p in stripe.paths() if p[1].startswith("/subscriptions")]
+
+
+def test_a_burst_of_syncs_reaches_stripe_only_a_few_times(billing):
+    _, c, supa, stripe = billing()
+    sync_ready(supa, stripe, [subscription(status="active")])
+    for _ in range(6):
+        assert c.post("/api/billing/sync", headers=signed_in()).status_code == 200
+    assert len([p for p in stripe.paths() if p == ("GET", "/subscriptions")]) == 3
+
+
+def test_sync_needs_a_session_and_this_site(billing):
+    _, c, supa, stripe = billing()
+    assert c.post("/api/billing/sync").status_code == 401
+    r = c.post("/api/billing/sync", headers={**signed_in(), "Origin": "https://evil.example"})
+    assert r.status_code == 403
+    assert stripe.calls == []
 
 
 # --------------------------------------------------------------------------
@@ -472,3 +553,15 @@ def test_older_api_versions_keep_the_period_on_the_subscription(billing):
     sub["items"]["data"][0].pop("current_period_end")
     sub["current_period_end"] = 1_700_000_000
     assert module._subscription_state(sub)["current_period_end"] == 1_700_000_000
+
+
+def test_a_refused_api_key_makes_stripe_retry_the_webhook(billing):
+    """Read as "user deleted", a refused SUPABASE_SECRET_KEY had every webhook
+    answered 200 with nothing written, so Stripe never retried: payments did
+    not grant Pro and cancellations never took it away."""
+    _, c, supa, stripe = billing()
+    stripe.on("GET", "/subscriptions/sub_1", body=subscription())
+    supa.on("GET", f"/admin/users/{USER_ID}", status=401,
+            body={"message": "Invalid API key", "hint": "Double check your Supabase API key."})
+    payload, headers = signed(event("customer.subscription.updated", subscription()))
+    assert c.post("/api/stripe/webhook", content=payload, headers=headers).status_code == 500

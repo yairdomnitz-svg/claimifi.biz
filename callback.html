@@ -43,12 +43,20 @@
 <main id="main" tabindex="-1">
   <div class="wrap">
     <div class="page-head">
-      <h1>Signing you in</h1>
+      <h1 id="callbackTitle">Signing you in</h1>
     </div>
     <div class="auth-card">
       <p class="msg info" id="callbackMsg" role="status">One moment…</p>
+      <div id="callbackConfirm" hidden>
+        <p id="callbackConfirmText"></p>
+        <p class="muted" id="callbackConfirmOther" hidden></p>
+        <div class="btn-col">
+          <button class="btn" type="button" id="callbackContinue">Continue</button>
+          <a class="btn-ghost" href="/">Not now</a>
+        </div>
+      </div>
       <div class="btn-col" id="callbackActions" hidden>
-        <a class="btn" href="/login">Go to log in</a>
+        <a class="btn" id="callbackActionLink" href="/login">Go to log in</a>
       </div>
     </div>
 

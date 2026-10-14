@@ -713,9 +713,10 @@
       return res.json().catch(function () { return {}; }).then(function (err) {
         if (res.status === 401 && err.reason === 'login_required') {
           // Signed out since the page loaded (or the session ended): log in
-          // and come straight back here.
-          window.location.href = '/login?next=' +
-            encodeURIComponent(window.location.pathname + window.location.search);
+          // and come straight back here, with what was typed still in the box.
+          // `next` is capped at 300 characters, so a long entry is dropped.
+          var back = '/app?q=' + encodeURIComponent(q);
+          window.location.href = '/login?next=' + encodeURIComponent(back.length <= 300 ? back : '/app');
           return;
         }
         if (res.status === 503 && err.reason === 'analysis_disabled') {
